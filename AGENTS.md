@@ -118,6 +118,21 @@ Standard `logging` module, a module-level `logger = logging.getLogger(__name__)`
 2. Never swallow silently — log before suppressing or re-raising.
 3. Wrap with context at layer boundaries: `raise <YourError>("…") from e`.
 
+## Security
+
+- **No raw query results in logs or traces.** A log line or OTel span may record a SQL
+  query's text, its timing, and its row/column count — never the row *content*. Requirement
+  2's PII ban applies to anything the system writes down, not only the chat response.
+- **Local SQLite writes are always parameterized** (`?` placeholders), never an f-string
+  or `.format()`-built SQL string — `saved_reports`/`feedback` store user-influenced free
+  text (titles, comments), so this isn't optional hygiene.
+- **A destructive-op confirmation is a raw, code-checked input**, never an LLM's judgment
+  that the conversation "sounds like" agreement — see `docs/architecture.md`'s
+  "Confirmation integrity."
+- The agent's BigQuery service account gets `roles/bigquery.dataViewer` scoped to the
+  `retail_analytics` dataset only — never project-wide, never on `bigquery-public-data`
+  directly.
+
 ## No premature abstraction
 
 Build what the current day's task needs, not a hypothetical future one. The
