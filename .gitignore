@@ -9,5 +9,8 @@ venv/
 .ruff_cache/
 *.db
 *.sqlite3
-qdrant_db/
 .DS_Store
+
+# Real local artifacts: generated data, downloaded secrets (service-account keys), and
+# anything else that must never reach git regardless of what it's named.
+.local/

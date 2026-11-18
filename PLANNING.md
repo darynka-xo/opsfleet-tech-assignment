@@ -178,7 +178,7 @@ of Day 2. Found and fixed, same day:
 **Goal:** Build the layer the agent is structurally forced to go through.
 
 - Apply Day 2's DDL: `sql/bigquery_views.sql` (governed views, `user_product_access`, the two per-user table functions) against BigQuery, and `sql/app_state.sql` against a local SQLite file.
-- Grant the agent's service account `roles/bigquery.dataViewer` on the `retail_analytics` dataset only (AGENTS.md's "Security" section) — confirm it cannot query `bigquery-public-data.thelook_ecommerce` directly once this is in place.
+- Grant the agent's service account `roles/bigquery.dataViewer` on the `retail_analytics` dataset only (AGENTS.md's "Security" section), and confirm for real (impersonation, not assumption) what it can and can't reach — see Day 3 results for what that actually showed.
 - Seed `user_product_access` with a handful of demo executive users and category sets; write a test that a cross-category query through `fn_products_for_user` returns zero rows for a user without that category's access.
 - Hand-author 15–30 Golden Bucket trios (question → SQL → analyst-style report) spanning the four required capability areas (customer behavior, product performance, time-based metrics, schema/meta questions).
 - Implement `VectorStore` interface + Qdrant adapter; embed trios with the Gemini embedding model; implement top-k retrieval with a diversity constraint (not just raw nearest-neighbor), per current text-to-SQL RAG practice.
@@ -186,6 +186,65 @@ of Day 2. Found and fixed, same day:
 - Unit tests: retrieval sanity-checks (a handful of queries retrieve topically-correct neighbors), masking tests (a raw-PII column is provably unreachable through the view).
 
 **Done when:** a standalone script embeds a sample question and returns sensible top-k golden examples, and a direct query attempt against a masked column returns no PII.
+
+### Day 3 results (2026-11-19)
+
+Everything below was run for real against the live project, not just written and assumed
+correct — several real bugs only surfaced this way, listed below rather than glossed over.
+
+- **BigQuery DDL applied.** `retail_analytics` dataset, 4 governed views, both per-user
+  table functions, and `user_product_access` all exist in the live project (confirmed via
+  `list_tables`/`list_routines`, not just "the script exited 0").
+- **Scoped service account created**: `retail-agent-runtime@opsfleet-tech-assignment.iam.gserviceaccount.com`,
+  granted `bigquery.dataViewer` on `retail_analytics` only plus the project-level
+  `bigquery.jobUser` every query needs. No downloadable key file — verified instead via
+  short-lived impersonation (`gcloud iam service-accounts add-iam-policy-binding
+  ... serviceAccountTokenCreator`), which needed the IAM Service Account Credentials API
+  enabled.
+- **Real finding, not assumed:** impersonating the scoped SA and querying
+  `bigquery-public-data.thelook_ecommerce.users` directly **succeeded** — IAM does not
+  block it, because Google's public datasets are independently world-readable to any
+  authenticated principal. Corrected the claim everywhere it appeared (AGENTS.md,
+  `sql/bigquery_views.sql`'s own description, this file): the real wall against the agent
+  reading raw PII is the Day 4 SQL validator's table whitelist, not this IAM grant. IAM
+  scoping is still real defense-in-depth against every other access path, just not this
+  one. Confirmed by impersonating the SA for real — the scoped SA could read
+  `vw_orders` and correctly got 0 rows from `fn_products_for_user` for an unassigned
+  category, but could also still read the raw public dataset directly.
+- **Real product categories used, not guessed:** queried the live distinct
+  `products.category` values before writing the ACL seed data — several categories
+  assumed during Day 2 design (Shoes, Jewelry, Sunglasses) don't exist in this dataset at
+  all. `scripts/seed_acl.py` seeds 3 demo users (`exec-apparel`, `exec-accessories`,
+  `exec-intimates`) against real category values.
+- **Two real bugs in `scripts/apply_bigquery_ddl.py`**, both found by actually running it,
+  not by review: (1) its original comment-detection regex had catastrophic backtracking
+  on a file with several consecutive comment lines — hung for real, for minutes, before
+  being diagnosed and replaced with a line-by-line check; (2) a naive split-on-`;` broke
+  on a `--` comment that itself contained a semicolon, truncating a real statement
+  mid-sentence. Fixed by stripping comments before splitting, and the DDL's own string
+  literals were edited to never contain `--` or `;` (documented in the script so the
+  mistake isn't repeated).
+- **One real bug in the Qdrant adapter**, also found by running its own test, not by
+  review: Qdrant's local mode only accepts an integer or a UUID as a point id, not an
+  arbitrary string like `cb-001` — fixed with a deterministic `uuid5` mapping so trio ids
+  stay human-readable in `data/golden_bucket_trios.yaml` while Qdrant gets what it needs.
+- **Golden Bucket**: 20 hand-authored trios (5 per capability area) in
+  `data/golden_bucket_trios.yaml`, embedded with `gemini-embedding-001` and loaded into a
+  local Qdrant collection via `scripts/embed_golden_bucket.py`. `scripts/query_golden_bucket.py`
+  (the Day 3 "done when" script) run twice with different real questions — both times the
+  top matches were genuinely topically relevant, and the diversity cap pulled in a second
+  or third capability area rather than returning near-duplicates of the top hit.
+- **Dynamic schema introspection** (`src/retail_agent/data/schema_context.py`) wired to
+  `BigQueryRunner.get_table_schema` against the live views; an integration test confirms
+  the built context reflects real columns and never mentions a masked-out column name.
+- **Tests**: 11 offline unit tests (Qdrant diversity/filtering logic, deterministic, no
+  network) plus 5 `@pytest.mark.integration` tests (PII-column masking, per-user ACL
+  scoping both ways, live schema introspection) — all 16 passing for real against the
+  live project, not mocked.
+- `ruff check`, `ruff format`, and `mypy src` all clean on every new file (two real mypy
+  findings fixed: Qdrant's `Filter.must` needs a covariant `Condition` list type, and
+  Gemini's embedding response fields are typed as optional and need a real None check,
+  not an assumption they're always populated).
 
 ---
 

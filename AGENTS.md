@@ -129,9 +129,18 @@ Standard `logging` module, a module-level `logger = logging.getLogger(__name__)`
 - **A destructive-op confirmation is a raw, code-checked input**, never an LLM's judgment
   that the conversation "sounds like" agreement — see `docs/architecture.md`'s
   "Confirmation integrity."
-- The agent's BigQuery service account gets `roles/bigquery.dataViewer` scoped to the
-  `retail_analytics` dataset only — never project-wide, never on `bigquery-public-data`
-  directly.
+- The agent's BigQuery service account is only ever *granted* access scoped to the
+  `retail_analytics` dataset — never project-wide, and we never grant it anything on
+  `bigquery-public-data` ourselves. **This IAM scoping is not what stops the agent from
+  reading raw PII** — `bigquery-public-data` is a public dataset, independently
+  world-readable to any authenticated principal, so the SA can in fact run a query
+  against it regardless of what we grant (confirmed Day 3, by actually trying it under
+  the real scoped SA via impersonation — not assumed). The real enforcement is the Day 4
+  SQL validator's table/function whitelist, which never lets a *generated* query
+  reference anything outside `retail_analytics`. IAM scoping is real defense-in-depth
+  against every other access path (the `bq` CLI, a different client, a leaked
+  credential used directly) — it just isn't the reason the agent itself can't see raw
+  PII.
 
 ## No premature abstraction
 

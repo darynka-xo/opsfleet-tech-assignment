@@ -1,0 +1,369 @@
+# Golden Bucket seed trios (requirement 1). Hand-authored, spanning the four required
+# capability areas. `@requesting_user_id` is the trusted, code-injected parameter the
+# orchestration layer supplies at execution time (never LLM-controlled) -- see
+# docs/decisions/ADR-004-per-user-product-acl.md. Every query here targets only
+# `retail_analytics` views/functions, never the raw `bigquery-public-data` tables, which
+# is exactly the pattern these examples exist to teach the SQL Generator by imitation.
+#
+# status: approved -- human-curated at authoring time, not candidate-queue output.
+- trio_id: cb-001
+  capability_area: customer_behavior
+  status: approved
+  created_at: "2026-11-19"
+  question: "Who are our top 10 customers by total spend?"
+  sql_query: |
+    SELECT oi.user_id, SUM(oi.sale_price) AS total_spend
+    FROM `opsfleet-tech-assignment.retail_analytics.fn_order_items_for_user`(@requesting_user_id) AS oi
+    WHERE oi.status != 'Cancelled'
+    GROUP BY oi.user_id
+    ORDER BY total_spend DESC
+    LIMIT 10
+  report_summary: |
+    The top 10 customers by lifetime spend range from $X to $Y, together accounting for
+    roughly N% of total order value in this view. Spend is concentrated, not evenly
+    spread -- the #1 customer alone outspends the #10 by a wide margin.
+    Action items: flag these accounts for a retention/loyalty outreach, and check whether
+    any are nearing a reorder window based on past cadence.
+
+- trio_id: cb-002
+  capability_area: customer_behavior
+  status: approved
+  created_at: "2026-11-19"
+  question: "What's the average number of items per order?"
+  sql_query: |
+    SELECT AVG(num_of_item) AS avg_items_per_order
+    FROM `opsfleet-tech-assignment.retail_analytics.vw_orders`
+    WHERE status != 'Cancelled'
+  report_summary: |
+    Average basket size is just under 2 items per order. That's a useful baseline for
+    judging whether a promotion (e.g. "buy 2 get 1") is actually lifting basket size
+    rather than just shifting which items get bought.
+
+- trio_id: cb-003
+  capability_area: customer_behavior
+  status: approved
+  created_at: "2026-11-19"
+  question: "Which traffic source brings in the highest-value customers?"
+  sql_query: |
+    SELECT u.traffic_source, AVG(spend.total_spend) AS avg_customer_spend
+    FROM `opsfleet-tech-assignment.retail_analytics.vw_users_masked` AS u
+    JOIN (
+      SELECT user_id, SUM(sale_price) AS total_spend
+      FROM `opsfleet-tech-assignment.retail_analytics.fn_order_items_for_user`(@requesting_user_id)
+      WHERE status != 'Cancelled'
+      GROUP BY user_id
+    ) AS spend ON spend.user_id = u.id
+    GROUP BY u.traffic_source
+    ORDER BY avg_customer_spend DESC
+  report_summary: |
+    Customers acquired through organic search and email have the highest average spend;
+    paid social brings in the most volume but the lowest average spend per customer.
+    Action item: reallocate a portion of paid-social budget toward email/organic growth
+    channels, since they convert to higher-value customers even if volume is lower.
+
+- trio_id: cb-004
+  capability_area: customer_behavior
+  status: approved
+  created_at: "2026-11-19"
+  question: "What percentage of orders get returned?"
+  sql_query: |
+    SELECT
+      COUNTIF(status = 'Returned') / COUNT(*) AS return_rate
+    FROM `opsfleet-tech-assignment.retail_analytics.vw_orders`
+  report_summary: |
+    Roughly 1 in 10 orders is returned. That's a reasonable e-commerce baseline, not
+    itself an alarm -- it's most useful as a benchmark to compare a specific product or
+    category's return rate against (see product-performance questions).
+
+- trio_id: cb-005
+  capability_area: customer_behavior
+  status: approved
+  created_at: "2026-11-19"
+  question: "How does spend differ between male and female customers?"
+  sql_query: |
+    SELECT u.gender, AVG(spend.total_spend) AS avg_spend
+    FROM `opsfleet-tech-assignment.retail_analytics.vw_users_masked` AS u
+    JOIN (
+      SELECT user_id, SUM(sale_price) AS total_spend
+      FROM `opsfleet-tech-assignment.retail_analytics.fn_order_items_for_user`(@requesting_user_id)
+      WHERE status != 'Cancelled'
+      GROUP BY user_id
+    ) AS spend ON spend.user_id = u.id
+    GROUP BY u.gender
+  report_summary: |
+    Average spend is close between the two groups, with no large gap -- gender alone
+    isn't a strong spend predictor in this dataset. State and traffic source are more
+    useful segmentation axes (see other customer-behavior questions).
+
+- trio_id: pp-001
+  capability_area: product_performance
+  status: approved
+  created_at: "2026-11-19"
+  question: "Compare the performance of the Outerwear & Coats and Jeans categories, and why do they perform differently?"
+  sql_query: |
+    SELECT
+      p.category,
+      COUNT(DISTINCT oi.order_id) AS orders,
+      SUM(oi.sale_price) AS revenue,
+      COUNTIF(oi.status = 'Returned') / COUNT(*) AS return_rate
+    FROM `opsfleet-tech-assignment.retail_analytics.fn_order_items_for_user`(@requesting_user_id) AS oi
+    JOIN `opsfleet-tech-assignment.retail_analytics.fn_products_for_user`(@requesting_user_id) AS p
+      ON p.id = oi.product_id
+    WHERE p.category IN ('Outerwear & Coats', 'Jeans')
+    GROUP BY p.category
+  report_summary: |
+    Jeans generate noticeably more revenue and a lower return rate than Outerwear & Coats.
+    The likely driver is fit risk and seasonality: coats are purchased less often but
+    returned more, consistent with sizing/fit being harder to judge online for outerwear.
+    Action item: add a sizing guide or fit-confidence prompt to outerwear product pages
+    before the next cold-weather buying season.
+
+- trio_id: pp-002
+  capability_area: product_performance
+  status: approved
+  created_at: "2026-11-19"
+  question: "What are our top 5 best-selling products by revenue?"
+  sql_query: |
+    SELECT p.name, p.category, SUM(oi.sale_price) AS revenue
+    FROM `opsfleet-tech-assignment.retail_analytics.fn_order_items_for_user`(@requesting_user_id) AS oi
+    JOIN `opsfleet-tech-assignment.retail_analytics.fn_products_for_user`(@requesting_user_id) AS p
+      ON p.id = oi.product_id
+    WHERE oi.status != 'Cancelled'
+    GROUP BY p.name, p.category
+    ORDER BY revenue DESC
+    LIMIT 5
+  report_summary: |
+    The top 5 products by revenue span three different categories -- revenue leadership
+    isn't concentrated in one department. Worth cross-checking these against inventory
+    levels to make sure none are at risk of stocking out.
+
+- trio_id: pp-003
+  capability_area: product_performance
+  status: approved
+  created_at: "2026-11-19"
+  question: "Which product category has the highest return rate?"
+  sql_query: |
+    SELECT
+      p.category,
+      COUNTIF(oi.status = 'Returned') / COUNT(*) AS return_rate
+    FROM `opsfleet-tech-assignment.retail_analytics.fn_order_items_for_user`(@requesting_user_id) AS oi
+    JOIN `opsfleet-tech-assignment.retail_analytics.fn_products_for_user`(@requesting_user_id) AS p
+      ON p.id = oi.product_id
+    GROUP BY p.category
+    ORDER BY return_rate DESC
+    LIMIT 5
+  report_summary: |
+    Swim and Intimates lead the return-rate ranking by a meaningful margin over the
+    rest of the catalog -- both are categories where online sizing is notoriously
+    unreliable. Action item: prioritize a sizing-chart or virtual-fit improvement for
+    these two categories before investing further marketing spend on them.
+
+- trio_id: pp-004
+  capability_area: product_performance
+  status: approved
+  created_at: "2026-11-19"
+  question: "What's the average sale price by brand for our top 10 brands by volume?"
+  sql_query: |
+    SELECT p.brand, COUNT(*) AS units_sold, AVG(oi.sale_price) AS avg_sale_price
+    FROM `opsfleet-tech-assignment.retail_analytics.fn_order_items_for_user`(@requesting_user_id) AS oi
+    JOIN `opsfleet-tech-assignment.retail_analytics.fn_products_for_user`(@requesting_user_id) AS p
+      ON p.id = oi.product_id
+    GROUP BY p.brand
+    ORDER BY units_sold DESC
+    LIMIT 10
+  report_summary: |
+    Among the top 10 brands by volume, average sale price ranges widely -- high-volume
+    doesn't necessarily mean low-price here, several of the top sellers also carry a
+    premium average price, suggesting genuine brand strength rather than discount-driven
+    volume.
+
+- trio_id: pp-005
+  capability_area: product_performance
+  status: approved
+  created_at: "2026-11-19"
+  question: "Which products are generating the best margin, accounting for cost?"
+  sql_query: |
+    SELECT
+      p.name,
+      p.category,
+      AVG(oi.sale_price - p.cost) AS avg_margin,
+      AVG((oi.sale_price - p.cost) / NULLIF(oi.sale_price, 0)) AS avg_margin_pct
+    FROM `opsfleet-tech-assignment.retail_analytics.fn_order_items_for_user`(@requesting_user_id) AS oi
+    JOIN `opsfleet-tech-assignment.retail_analytics.fn_products_for_user`(@requesting_user_id) AS p
+      ON p.id = oi.product_id
+    WHERE oi.status != 'Cancelled'
+    GROUP BY p.name, p.category
+    ORDER BY avg_margin_pct DESC
+    LIMIT 10
+  report_summary: |
+    The highest-margin-percentage products skew toward accessories rather than apparel --
+    smaller absolute price points but a much larger markup over cost. Revenue leaders
+    (see the best-sellers question) and margin leaders are mostly different products,
+    which is worth knowing before assuming "best seller" means "most profitable."
+
+- trio_id: tb-001
+  capability_area: time_based
+  status: approved
+  created_at: "2026-11-19"
+  question: "What's our monthly revenue trend for the last 6 months?"
+  sql_query: |
+    SELECT
+      FORMAT_TIMESTAMP('%Y-%m', o.created_at) AS month,
+      SUM(oi.sale_price) AS revenue
+    FROM `opsfleet-tech-assignment.retail_analytics.fn_order_items_for_user`(@requesting_user_id) AS oi
+    JOIN `opsfleet-tech-assignment.retail_analytics.vw_orders` AS o ON o.order_id = oi.order_id
+    WHERE o.created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 MONTH)
+      AND oi.status != 'Cancelled'
+    GROUP BY month
+    ORDER BY month
+  report_summary: |
+    Revenue has grown steadily month over month, with one dip in the middle of the window
+    that lines up with a seasonal lull rather than a sustained decline. The most recent
+    month is the strongest in the series.
+
+- trio_id: tb-002
+  capability_area: time_based
+  status: approved
+  created_at: "2026-11-19"
+  question: "What's our up-to-date revenue by product this quarter?"
+  sql_query: |
+    SELECT p.name, SUM(oi.sale_price) AS revenue_this_quarter
+    FROM `opsfleet-tech-assignment.retail_analytics.fn_order_items_for_user`(@requesting_user_id) AS oi
+    JOIN `opsfleet-tech-assignment.retail_analytics.fn_products_for_user`(@requesting_user_id) AS p
+      ON p.id = oi.product_id
+    JOIN `opsfleet-tech-assignment.retail_analytics.vw_orders` AS o ON o.order_id = oi.order_id
+    WHERE o.created_at >= TIMESTAMP_TRUNC(CURRENT_TIMESTAMP(), QUARTER)
+      AND oi.status != 'Cancelled'
+    GROUP BY p.name
+    ORDER BY revenue_this_quarter DESC
+  report_summary: |
+    Quarter-to-date revenue by product mirrors the same top performers as the
+    all-time best-sellers list, with one new product breaking into the top 5 -- worth
+    watching whether that's a one-off promotion effect or a genuine trend.
+
+- trio_id: tb-003
+  capability_area: time_based
+  status: approved
+  created_at: "2026-11-19"
+  question: "Why did our churn rate spike last month?"
+  sql_query: |
+    -- Step 1: define an active user as one with an order in the window; compare
+    -- month-over-month active-user counts to locate the spike.
+    SELECT
+      FORMAT_TIMESTAMP('%Y-%m', created_at) AS month,
+      COUNT(DISTINCT user_id) AS active_users
+    FROM `opsfleet-tech-assignment.retail_analytics.vw_orders`
+    WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 MONTH)
+    GROUP BY month
+    ORDER BY month
+  report_summary: |
+    This is a two-step question, not a single-query one (a worked example of the
+    self-correction loop's "needs more data" path, not just error retries). Step 1
+    (above) locates which month active users dropped. Step 2 (a follow-up query, run
+    once the spike month is known) would break that month's lapsed users down by their
+    prior traffic source and first-purchase category to find which segment drove it,
+    rather than guessing. Action item: once the driver segment is identified, target a
+    win-back offer at exactly that segment rather than a blanket campaign.
+
+- trio_id: tb-004
+  capability_area: time_based
+  status: approved
+  created_at: "2026-11-19"
+  question: "How many orders were placed on each day of the week?"
+  sql_query: |
+    SELECT
+      FORMAT_TIMESTAMP('%A', created_at) AS day_of_week,
+      COUNT(*) AS order_count
+    FROM `opsfleet-tech-assignment.retail_analytics.vw_orders`
+    GROUP BY day_of_week
+    ORDER BY order_count DESC
+  report_summary: |
+    Weekday order volume is noticeably higher than weekend volume, peaking midweek.
+    Useful for timing promotional emails and staffing customer support around the actual
+    demand curve rather than a flat weekly schedule.
+
+- trio_id: tb-005
+  capability_area: time_based
+  status: approved
+  created_at: "2026-11-19"
+  question: "How did order volume this Q1 compare to Q4 of last year?"
+  sql_query: |
+    SELECT
+      CASE
+        WHEN EXTRACT(QUARTER FROM created_at) = 1 THEN 'Q1 this year'
+        ELSE 'Q4 last year'
+      END AS period,
+      COUNT(DISTINCT order_id) AS order_count
+    FROM `opsfleet-tech-assignment.retail_analytics.vw_orders`
+    WHERE (EXTRACT(QUARTER FROM created_at) = 1 AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_DATE()))
+       OR (EXTRACT(QUARTER FROM created_at) = 4 AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_DATE()) - 1)
+    GROUP BY period
+  report_summary: |
+    Q1 order volume is down slightly from the prior Q4, which is a normal seasonal
+    pattern (Q4 includes the holiday peak) rather than a cause for concern on its own --
+    best read alongside a year-over-year Q1-to-Q1 comparison, not just the adjacent
+    quarter.
+
+- trio_id: sm-001
+  capability_area: schema_meta
+  status: approved
+  created_at: "2026-11-19"
+  question: "What data do you have access to, and what can I ask about?"
+  sql_query: ""
+  report_summary: |
+    No query needed -- this is answered from the agent's own schema knowledge, not a
+    BigQuery call. Response pattern: list the four analytical views (orders, order items,
+    products -- scoped to your assigned categories, and masked customer demographics) and
+    give 2-3 example questions per area so the user has a concrete starting point rather
+    than a bare capability list.
+
+- trio_id: sm-002
+  capability_area: schema_meta
+  status: approved
+  created_at: "2026-11-19"
+  question: "What information do you have about each customer?"
+  sql_query: ""
+  report_summary: |
+    No query needed. Response pattern: name the available fields (age, gender, state,
+    country, traffic source, account-created date) and explicitly state what's *not*
+    available and why -- name, email, and exact address are masked and never shown,
+    per the PII policy, not because the data doesn't exist.
+
+- trio_id: sm-003
+  capability_area: schema_meta
+  status: approved
+  created_at: "2026-11-19"
+  question: "What time range does the order data cover?"
+  sql_query: |
+    SELECT MIN(created_at) AS earliest_order, MAX(created_at) AS latest_order
+    FROM `opsfleet-tech-assignment.retail_analytics.vw_orders`
+  report_summary: |
+    States the earliest and latest order timestamps plainly, then a one-line
+    implication: any "last N months" question is automatically bounded by this range, so
+    a question about a period before the earliest order gets a clear "no data in that
+    range" instead of a silently empty report.
+
+- trio_id: sm-004
+  capability_area: schema_meta
+  status: approved
+  created_at: "2026-11-19"
+  question: "What product attributes can I filter or group by?"
+  sql_query: ""
+  report_summary: |
+    No query needed. Response pattern: list category, brand, department, and price
+    (cost/retail) as the groupable/filterable attributes, each with one real example
+    value pulled from the live schema introspection (Day 3's dynamic schema wiring) so
+    the answer reflects the actual data, not a generic textbook description.
+
+- trio_id: sm-005
+  capability_area: schema_meta
+  status: approved
+  created_at: "2026-11-19"
+  question: "What do the different order status values mean?"
+  sql_query: |
+    SELECT DISTINCT status FROM `opsfleet-tech-assignment.retail_analytics.vw_orders`
+  report_summary: |
+    Lists the distinct status values actually present in the data (e.g. Complete,
+    Shipped, Processing, Cancelled, Returned) rather than assuming a fixed enum --
+    schema-meta answers should reflect what's really in the table, since an assumed
+    status list can silently go stale as the data changes.

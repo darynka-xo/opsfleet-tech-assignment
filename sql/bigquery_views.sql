@@ -9,7 +9,7 @@
 
 CREATE SCHEMA IF NOT EXISTS `opsfleet-tech-assignment.retail_analytics`
 OPTIONS (
-  description = "Governed views + agent-readable ACL over bigquery-public-data.thelook_ecommerce. The agent's service account is granted BigQuery Data Viewer on this dataset only -- never on the public dataset's base tables directly."
+  description = "Governed views + agent-readable ACL over bigquery-public-data.thelook_ecommerce. The agent's service account is only ever granted BigQuery Data Viewer on this dataset, nothing project-wide. bigquery-public-data is independently world-readable, so the real wall against the agent reading raw PII is the Day 4 SQL validator's table whitelist, not this grant; see AGENTS.md Security."
 );
 
 -- 1. Governed views over the 4 source tables -----------------------------------------
@@ -46,7 +46,7 @@ FROM `bigquery-public-data.thelook_ecommerce.users`;
 -- per (app user, product category) they're allowed to analyze.
 
 CREATE TABLE IF NOT EXISTS `opsfleet-tech-assignment.retail_analytics.user_product_access` (
-  app_user_id      STRING NOT NULL OPTIONS (description = "Demo executive user id -- not a real GCP/IAM principal, see the table function comment below."),
+  app_user_id      STRING NOT NULL OPTIONS (description = "Demo executive user id, not a real GCP/IAM principal, see the table function comment below."),
   product_category STRING NOT NULL,
   granted_at       TIMESTAMP NOT NULL
 );
