@@ -1,0 +1,4 @@
+# Git stores text as LF. `text=auto` leaves each checkout's other files to
+# core.autocrlf, so Windows users do not have to change their Git config.
+* text=auto
+*.toml text eol=lf

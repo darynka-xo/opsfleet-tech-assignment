@@ -1,0 +1,6 @@
+[default]
+locale = "en-us"
+
+[default.extend-words]
+# BigQuery/thelook_ecommerce dataset identifiers, not misspellings.
+thelook = "thelook"

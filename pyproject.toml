@@ -1,0 +1,85 @@
+[project]
+name = "retail-agent"
+version = "0.1.0"
+description = "Retail data-analysis chat agent (OpsFleet AI Technical Assignment)."
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "google-cloud-bigquery>=3.47,<4",
+  "db-dtypes>=1.9,<2",
+  "pandas>=3.1,<4",
+  "google-genai>=3.5,<4",
+  "langgraph>=1.2,<2",
+  "langchain-core>=1.8,<2",
+  "langchain-google-genai>=4.5,<5",
+  "qdrant-client>=1.20,<2",
+  # sqlglot bumps its major version for non-breaking changes more often than semver
+  # would suggest; exact pin until that's been re-checked against a newer release.
+  "sqlglot==30.33.0",
+  "tenacity>=9.1,<10",
+  "pydantic>=2.14,<3",
+  "python-dotenv>=1.2,<2",
+  "rich>=15.0,<16",
+  "prompt-toolkit>=3.0,<4",
+]
+
+[dependency-groups]
+dev = ["pytest>=9.2,<10", "ruff==0.17.5", "mypy>=1.14,<2", "pre-commit>=4.0,<5"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/retail_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs real GCP/Gemini access; opt-in"]
+
+[tool.mypy]
+python_version = "3.14"
+# bq_client.py is third-party (see AGENTS.md); not held to this project's strictness.
+exclude = ["src/retail_agent/data/bq_client.py"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests", "scripts"]
+target-version = "py314"
+# bq_client.py is provided as-is by the client (OpsFleet) to build on top of, not restyle.
+exclude = ["src/retail_agent/data/bq_client.py"]
+
+[tool.ruff.lint]
+# E/F/I/UP are the original baseline. The rest enforce by tool what used to be only
+# written down in prose: docstrings, annotations, print, blind except, pathlib, logging,
+# and self-canceling noqa comments.
+select = [
+  "E",
+  "F",
+  "I",
+  "UP",
+  "B",
+  "SIM",
+  "D",
+  "ANN",
+  "T20",
+  "BLE",
+  "PTH",
+  "LOG",
+  "G",
+  "PGH",
+  "RUF100",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "ANN"]
+"scripts/**" = ["T20"]
+# Day 1 throwaway spike: module-level script, not library code (see its own docstring).
+"scripts/day1_spike.py" = ["T20"]
+# Empty package markers carry no docstring or import.
+"**/__init__.py" = ["D104", "I002"]
