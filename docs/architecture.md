@@ -56,6 +56,76 @@ flowchart TB
     Execute <--> BQ[("BigQuery — retail_analytics views + ACL")]
     Persist <--> SQLite[("Local SQLite — reports, profiles, feedback")]
     Graph -.->|gen_ai.* spans, structured logs| Otel["Observability sink"]
+
+    style Graph fill:#e0f7fa,stroke:#00838f
+    style Qdrant fill:#e8f5e9,stroke:#2e7d32
+    style BQ fill:#fff8e1,stroke:#f9a825
+    style SQLite fill:#fff8e1,stroke:#f9a825
+    style Otel fill:#f3e5f5,stroke:#6a1b9a
+    style CLI fill:#fce4ec,stroke:#ad1457
+```
+
+## 1a. Turn sequence (Day 4, as actually built and run)
+
+Same graph as above, shown as the message sequence for one real turn — the two
+branches are exactly what `src/retail_agent/graph.py` does, verified by running the
+live CLI, not just designed on paper (see PLANNING.md's Day 4 results for the transcripts).
+
+```mermaid
+sequenceDiagram
+    box rgb(255,243,224) Client
+        actor Person
+        participant CLI as CLI chat loop
+    end
+    box rgb(224,247,250) Orchestrator
+        participant Agent as LangGraph agent
+    end
+    box rgb(252,228,236) LLM
+        participant Gemini
+    end
+    box rgb(232,245,233) Golden Bucket
+        participant Qdrant
+    end
+    box rgb(255,249,196) Data layer
+        participant BQ as BigQuery
+    end
+
+    Person->>CLI: "Who are our top 5 customers by spend?"
+    CLI->>Agent: invoke(question, thread_id=session_id)
+
+    Agent->>Gemini: classify intent (router)
+    Gemini-->>Agent: ANALYSIS
+
+    alt off-topic or unsafe
+        Agent->>Gemini: safety check (guardrail)
+        Gemini-->>Agent: UNSAFE
+        Agent-->>CLI: polite refusal, logged
+    else on-topic and safe
+        Agent->>Gemini: safety check (guardrail)
+        Gemini-->>Agent: SAFE
+        Agent->>Gemini: embed(question)
+        Gemini-->>Agent: embedding vector
+        Agent->>Qdrant: query(embedding, top_k=5, diversity-capped)
+        Qdrant-->>Agent: Golden Bucket examples
+
+        loop self-correction, bounded at 3 attempts total
+            Agent->>Gemini: generate SQL (schema + examples + question + prior error)
+            Gemini-->>Agent: candidate SQL
+            Agent->>Agent: validate_sql — table/function whitelist, SELECT-only
+            Agent->>BQ: dry run
+            BQ-->>Agent: ok, or a syntax/permission error
+            Agent->>BQ: execute
+            BQ-->>Agent: result rows, or an error
+            Note over Agent: a validation failure, dry-run error, execution<br/>error, or empty result feeds back as another attempt
+        end
+
+        Agent->>Gemini: synthesize report (question + rows + style examples)
+        Gemini-->>Agent: report text, or "NEEDS_MORE_DATA: ..."
+        Note over Agent,Gemini: NEEDS_MORE_DATA shares the same attempt<br/>budget as the loop above — never a separate, unbounded one
+        Agent-->>CLI: final_answer
+    end
+
+    CLI-->>Person: rendered report (Rich markdown)
 ```
 
 ## 2. Data flow walkthrough (one turn, end to end)
@@ -170,9 +240,8 @@ bad answer.
 ## 4. Data layer design
 
 Full DDL lives in [sql/bigquery_views.sql](../sql/bigquery_views.sql) (BigQuery) and
-[sql/app_state.sql](../sql/app_state.sql) (local SQLite); both are design artifacts for
-now (syntax-validated, not yet applied — Day 3 applies them) and are referenced, not
-duplicated, below.
+[sql/app_state.sql](../sql/app_state.sql) (local SQLite); both are applied live, not just
+designed (Day 3/4 results in PLANNING.md), and are referenced, not duplicated, below.
 
 **Split rationale.** AGENTS.md locks "BigQuery is read-only and stays read-only" for the
 agent's own runtime. Four things the brief needs — `saved_reports`, `user_profiles`,
@@ -181,7 +250,7 @@ normal conversation turn, which would violate that lock if they lived in BigQuer
 
 | Store | Holds | Written by the live agent? |
 | --- | --- | --- |
-| BigQuery (`retail_analytics` dataset) | Governed views over the 4 source tables, `user_product_access` ACL, the two per-user table functions | No — SELECT only. `user_product_access` is seeded once by an admin script, same as the views are created once. |
+| BigQuery (`retail_analytics` dataset) | Governed views over the 4 source tables (internal only — see below), `user_brand_access` ACL, 4 brand-scoped table functions | No — SELECT only. `user_brand_access` is seeded once by an admin script, same as the views are created once. |
 | Local SQLite | `saved_reports`, `report_audit_log`, `user_profiles`, `feedback`, the LangGraph checkpointer | Yes — this is exactly the state a conversation turn needs to read and write. |
 | Qdrant | Golden Bucket trios (question, SQL, report, capability area, curation status) | Yes, but only through the Day 6 candidate-then-approve path, never a direct write from a live turn's own output. |
 
@@ -194,22 +263,21 @@ table); they don't apply here because `bigquery-public-data` isn't a dataset we 
 there's nothing of ours to attach a policy taxonomy to. Omission at the view layer
 achieves the same "never retrievable" guarantee without that machinery.
 
-**Per-user product ACL (requirement 2, part 2).** See the table-function comments in
-`sql/bigquery_views.sql` — summarized in §a above and in
-[ADR-004](decisions/ADR-004-per-user-product-acl.md). In short: BigQuery's native row
-access policies key off the querying IAM principal, but every app user shares one
-service account, so BigQuery itself can't tell them apart. The fix is a parameterized
-table function where the orchestration code (never the LLM) supplies the authenticated
-`app_user_id`, combined with a SQL validator that only ever allows the generated query to
-call that function for product-level data — never a raw, unfiltered `SELECT` against the
-underlying view.
-
-**Open assumption, carried from AGENTS.md:** "products related to him" is read here as
-*product-and-order-item-level* analysis being scoped to the user's assigned categories;
-user-level and order-level aggregates that don't reference specific products (e.g. "how
-many orders were placed last month") are not further restricted, since they're not "about
-a product." This is a judgment call on ambiguous brief wording, flagged for the client to
-confirm rather than silently assumed.
+**Per-brand ACL (requirement 2, part 2) — confirmed answer, 2026-11-19.** Asked the
+client directly rather than guessing further: access is by **brand**, not category
+("each manager can analyze only the brands they manage, and the CEO sees everything"),
+and **order/customer data is visible only through a purchase of an in-scope-brand
+product** — a broader rule than originally designed. See the table-function comments in
+`sql/bigquery_views.sql` and [ADR-004](decisions/ADR-004-per-user-product-acl.md) for the
+full before/after. In short: BigQuery's native row access policies key off the querying
+IAM principal, but every app user shares one service account, so BigQuery itself can't
+tell them apart. The fix is four parameterized table functions
+(`fn_products_for_user`, `fn_order_items_for_user`, `fn_orders_for_user`,
+`fn_customers_for_user`) where the orchestration code (never the LLM) supplies the
+authenticated `app_user_id`, combined with a SQL validator that only ever allows a
+generated query to call one of these four — never a raw `SELECT` against any `vw_*` view.
+`'ceo'` is a reserved id that bypasses the brand check in every function, rather than
+being seeded with all ~2,800 brands.
 
 ## 5. Destructive-op resolution semantics (requirement 3)
 
@@ -320,7 +388,7 @@ in this design carry the weight of that, rather than it needing its own subsyste
 | # | Requirement (brief) | Primary component(s) | Where addressed |
 | --- | --- | --- | --- |
 | 1 | Hybrid Intelligence — Golden Bucket, update over time, retrieval at query time | Golden Bucket Retriever, Qdrant, Day 6 curation loop | §3 above; implemented Day 3 (retrieval), Day 6 (update loop) |
-| 2 | Safety & PII Masking — forbidden PII output, per-user product scoping | Guardrail Gate, `vw_users_masked`, `fn_products_for_user`/`fn_order_items_for_user`, SQL Validator | §4 above, `sql/bigquery_views.sql`; implemented Day 3 (data layer), Day 4 (guardrail + validator), Day 5 (hardening) |
+| 2 | Safety & PII Masking — forbidden PII output, per-brand scoping | Guardrail Gate, `vw_users_masked`, the 4 `fn_*_for_user` functions, SQL Validator | §4 above, `sql/bigquery_views.sql`, ADR-004; implemented Day 3 (data layer), Day 4 (guardrail + validator), confirmed and corrected against the client's real answer Day 4 |
 | 3 | High-Stakes Oversight — destructive-ops confirmation, scoped to own reports | Delete-Intent Parser, Candidate Resolver, `interrupt()`/`Command`, `saved_reports`/`report_audit_log` | §5 above, `sql/app_state.sql`; implemented Day 5 |
 | 4 | Continuous Improvement — user-level + system-level learning | `user_profiles` (4a), Day 6 feedback → Golden Bucket candidate loop (4b) | §3 above (4b), `sql/app_state.sql` (4a); implemented Day 5 (4a), Day 6 (4b) |
 | 5 | Resilience & Graceful Error Handling | Self-correction loop, `tenacity` retry/circuit breaker, cost/token guard | §c above; implemented Day 4 |
@@ -333,10 +401,12 @@ named section above — none were silently dropped between planning and this doc
 
 ## 11. Open design questions carried into Day 3+
 
-- The "products related to him" scope boundary (§4) is a documented interpretation, not a
-  confirmed client answer — flagged, not silently assumed.
-- `user_product_access` category grain (one row per category, not per brand/SKU) is the
-  simplest demo mapping that satisfies the requirement; revisit if Day 3's seed data makes
-  category-level scoping feel too coarse or too fine for a believable demo.
-- The exact self-correction retry budget (2, per §c) and the per-turn cost/token ceiling
-  are Day 4 implementation parameters, not yet tuned against real latency/cost numbers.
+- ~~The "products related to him" scope boundary is a documented interpretation, not a
+  confirmed client answer~~ — **resolved 2026-11-19**: access is by brand, and order/
+  customer data is scoped through in-scope purchases too. See §4 and ADR-004.
+- The exact self-correction retry budget (3 total attempts, per §c) and the per-turn
+  cost/token ceiling are Day 4 implementation parameters (the latter simplified to the
+  attempt-count bound itself — see PLANNING.md's Day 4 results), not yet tuned against
+  real latency/cost numbers at scale.
+- `'ceo'` as a literal reserved `app_user_id` is fine for this prototype; a real
+  deployment would resolve a CEO/admin role from an actual auth system instead.

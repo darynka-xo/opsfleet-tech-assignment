@@ -184,11 +184,12 @@ documented environment variable is set.
 
 ## Open assumptions to keep visible (carry into the final submission doc)
 
-- `thelook_ecommerce` has no real "this product belongs to this user" relationship, so the
-  per-user product ACL (requirement 2) is a synthetic demo mapping, documented as such.
+- `thelook_ecommerce` has no real "this brand belongs to this manager" relationship, so
+  the per-user brand ACL (requirement 2, confirmed by the client as brand-based on
+  2026-11-19 — see ADR-004) is a synthetic demo mapping, documented as such.
 - "Delete all the reports we made in this conversation" is resolved by `session_id`
-  tracked on each saved report, not by re-matching content — documented in PLANNING.md
-  Day 2.
+  tracked on each saved report, not by re-matching content — confirmed by the client
+  2026-11-19, documented in PLANNING.md Day 2/Day 4.
 
 ## Useful references
 

@@ -1,6 +1,7 @@
 # ADR-004: Per-user product ACL enforcement mechanism
 
-**Status:** Accepted (design-stage, DDL syntax-validated 2026-11-18, not yet applied)
+**Status:** Accepted (applied live; confirmed and corrected against the client's real
+answer on 2026-11-19 -- see "Update" below)
 
 ## Context
 
@@ -26,34 +27,65 @@ human on the other end of the conversation is.
 
 ## Decision
 
-Use **`fn_products_for_user(requesting_user_id STRING)`** and
-**`fn_order_items_for_user(requesting_user_id STRING)`** (both in
-`sql/bigquery_views.sql`) as the only way product- or order-item-level data is reachable.
+Use four parameterized table functions (all in `sql/bigquery_views.sql`) as the *only*
+way any analytical data is reachable — no `vw_*` base view is in the SQL validator's
+whitelist:
+
+- `fn_products_for_user(requesting_user_id STRING)`
+- `fn_order_items_for_user(requesting_user_id STRING)`
+- `fn_orders_for_user(requesting_user_id STRING)`
+- `fn_customers_for_user(requesting_user_id STRING)`
 
 1. The **id itself is never LLM-controlled** — the orchestration layer (trusted code, not
    a generated-SQL string) reads it from the authenticated session and injects it as a
    query parameter immediately before execution.
-2. The **Day 4 SQL validator** (`sqlglot`) enforces that any query touching
-   product/order-item data calls one of these two functions — a raw `SELECT` against
-   `vw_products` or `vw_order_items` is rejected, not just discouraged.
-3. Both functions share one underlying check: `EXISTS (... user_product_access WHERE
-   acl.app_user_id = requesting_user_id AND acl.product_category = p.category)` — one ACL
-   table, one rule, applied consistently at both grains.
+2. The **Day 4 SQL validator** (`sqlglot`) enforces that any generated query calls one of
+   these four functions — a raw `SELECT` against any `vw_*` view is rejected outright, not
+   just discouraged.
+3. `fn_products_for_user`/`fn_order_items_for_user` share one underlying check against
+   `user_brand_access`; `fn_orders_for_user`/`fn_customers_for_user` are each defined as
+   "rows reachable through at least one in-scope order item" (a nested `EXISTS` against
+   `fn_order_items_for_user`, confirmed to work in live BigQuery, not assumed).
+4. `'ceo'` is a reserved `app_user_id` that bypasses the ACL check in every function
+   (`requesting_user_id = 'ceo' OR EXISTS (...)`) — not ~2,800 seeded rows, one per brand.
+
+## Update (2026-11-19) — corrected against the client's real answer
+
+Everything above about the *mechanism* (table function, trusted parameter, validator
+whitelist) held up. Two things about the *grain* did not, and were corrected once the
+client actually answered (see PLANNING.md's "Day 4 addendum"):
+
+- **ACL grain is brand, not category.** "Each manager can analyze only the brands they
+  manage" — confirmed. `user_brand_access` (renamed from `user_product_access`) is keyed
+  by `brand`, not `product_category`. thelook_ecommerce has ~2,800 distinct brands vs. 25
+  categories — category remains a valid analysis dimension (`GROUP BY category` still
+  works fine inside a user's already-brand-scoped products), it's just never the access
+  check itself.
+- **Order and customer data needed their own scoping, not just products/order-items.**
+  "Customer and order data are visible only through purchases of in-scope products" —
+  this wasn't in the original design (`vw_orders`/`vw_users_masked` were originally
+  planned as freely queryable). `fn_orders_for_user`/`fn_customers_for_user` close that
+  gap: an order or a customer is reachable only if at least one of their order items is
+  for an in-scope brand.
+- **CEO sees everything** — not previously designed for at all; added as the `'ceo'`
+  bypass above rather than a brute-force full-brand seed.
 
 ## Consequences
 
 - **Gained.** The filter is enforced the same way regardless of what the LLM generates —
-  structurally unbypassable by prompt injection, not merely instructed against.
-- **Accepted cost.** Two extra objects to maintain (vs. a single row access policy would
-  have been, had it worked) and the validator now has one more thing to check (a
-  function-call allowlist, not just a view allowlist).
-- **Not decided.** Whether "products related to him" should also scope user-level/
-  order-level aggregates that don't name a specific product — see
-  [architecture.md](../architecture.md)'s "Open design questions."
+  structurally unbypassable by prompt injection, not merely instructed against. Now
+  correct against the client's actual access model, confirmed by asking rather than by
+  shipping the original (wrong) category-based guess to Day 7.
+- **Accepted cost.** Four objects to maintain instead of two; the validator's whitelist is
+  function-only now, with zero views exposed directly.
+- **Not decided.** Whether "ceo" should be the literal reserved id in a real deployment,
+  or a role claim resolved from an actual auth system — fine for a prototype, a real
+  gap for production hardening.
 
 ## Validation
 
-`sql/bigquery_views.sql` parses cleanly under `sqlglot`'s BigQuery dialect (8/8
-statements, including both table functions). Not yet applied to the live
-`opsfleet-tech-assignment` project — that's Day 3's "Done when" gate, including a test
-that a cross-category query returns zero rows for a user without that category's access.
+Applied live to `opsfleet-tech-assignment.retail_analytics`. Verified for real (not
+assumed): `mgr-denim` sees exactly `{Calvin Klein, Levi's}` and nothing else; an unknown
+user sees zero brands; `'ceo'` sees the same brand set as an unrestricted query;
+`fn_orders_for_user('mgr-denim')` returns more than zero and fewer than the total order
+count. Full conversation transcripts in PLANNING.md's Day 4 results.

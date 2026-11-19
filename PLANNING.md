@@ -18,7 +18,7 @@ approach, and the day's exit criteria ("Done when").
 | LLM provider | **Gemini**, via an abstracted `LLMClient` interface | Required by the brief for grading. Abstracted so a second provider can be dropped in without touching graph logic (the brief allows "another provider" but Gemini is what's graded). **Confirmed live on Day 1** against the actual AI Studio catalog (web research on model names turned out stale/unreliable — see ADR-002): `gemini-2.5-flash` for SQL-gen/routing/guardrail, `gemini-2.5-pro` for report synthesis, `gemini-embedding-001` for Golden Bucket embeddings. Direct `google-genai` SDK calls from LangGraph nodes, not the `langchain-google-genai` wrapper — see ADR-002. |
 | Golden Bucket vector store | **Qdrant**, embedded/local mode for the prototype, behind a `VectorStore` interface | Same engine locally and in production (Qdrant Cloud or self-hosted) — zero infra for the prototype without a separate "swap to a different engine later" migration. Rationale in ADR-003. |
 | PII masking | **BigQuery-native, view-level**: governed views in our own `retail_analytics` dataset simply never select the hard-PII columns — the agent's service account only ever sees these views, never the raw public-dataset tables | Industry consensus is "enforce in the data layer, not the prompt." **Refined Day 2**: Data Catalog policy tags don't apply here — `bigquery-public-data` isn't ours to attach a policy taxonomy to; column omission at the view layer gives the same "never retrievable" guarantee without that machinery. Full design in `docs/architecture.md` §4. |
-| Per-user product ACL ("products related to him") | Synthetic `user_product_access` mapping table (demo seed data) + a parameterized BigQuery table function, not a native row access policy | `thelook_ecommerce` has no real owner/rep-to-product relationship, so this is a documented assumption: each demo executive user is assigned a set of product categories they may analyze. **Refined Day 2**: native row access policies filter by the querying IAM principal, but every app user shares one service account, so BigQuery can't tell them apart — see ADR-004. |
+| Per-user brand ACL ("products related to him") | Synthetic `user_brand_access` mapping table (demo seed data) + 4 parameterized BigQuery table functions, not a native row access policy | `thelook_ecommerce` has no real manager-to-brand relationship, so this is a documented assumption: each demo manager is assigned a set of brands they may analyze, and order/customer data is scoped through in-scope purchases too. **Refined Day 2**: native row access policies filter by the querying IAM principal, but every app user shares one service account, so BigQuery can't tell them apart — see ADR-004. **Confirmed and corrected Day 4** against the client's real answer: brand, not category; order/customer data scoped too; a `'ceo'` bypass for "sees everything." |
 | Destructive-op confirmation | LangGraph `interrupt()` gating only the delete tool, resumed via `Command` after explicit "yes" | Matches current LangGraph HITL guidance: gate only risky/irreversible tools, not read-only ones; persist state via checkpointer so the pause survives across turns. |
 | Persona/instructions | External `persona.yaml`, hot-reloaded every turn, no redeploy | Satisfies "CEO wants to change tone weekly." Versioned in git (or swappable for a Firestore doc in production) so changes are reviewable and revertible. |
 | Observability | Structured JSON logs + OpenTelemetry spans using GenAI semantic-convention-style attribute names (`gen_ai.*`), correlated by `session_id`/`turn_id`/`trace_id` | The OTel GenAI conventions are still stabilizing (confirmed via research — some sources call them stable, others still "Development" status as of mid-2026), so conventions are treated as a versioned contract to align to, not a hard dependency. Exporter is pluggable (console/file for prototype, OTLP → Langfuse or Cloud Trace for production). |
@@ -259,6 +259,98 @@ correct — several real bugs only surfaced this way, listed below rather than g
 - CLI chat loop (`rich` + `prompt_toolkit`): readable tables/markdown, spinners during tool calls.
 
 **Done when:** a multi-turn CLI conversation answers questions in all four required capability categories against masked data, and survives a deliberately broken query without crashing.
+
+### Day 4 results (2026-11-19)
+
+The full pipeline runs for real through the actual CLI (`python -m retail_agent --user
+<id>`), not just via unit tests — transcripts below are real runs, not illustrations.
+
+- **Graph built** (`src/retail_agent/graph.py`): intent router → guardrail → Golden
+  Bucket retrieval → SQL generation → `sqlglot` validation
+  (`src/retail_agent/sql_validator.py`, 12 tests including real attack patterns: raw
+  public-dataset access, multi-statement injection, DROP/DELETE, the ACL table read
+  directly — all rejected) → BigQuery dry run → execution → report synthesis. The
+  self-correction loop (requirement 5) shares one bounded attempt budget
+  (`MAX_SQL_ATTEMPTS = 3`) across *both* triggers it was designed for: a validation/dry-run/
+  execution failure, and the synthesizer flagging `NEEDS_MORE_DATA` for a comparative
+  question — confirmed this doesn't let one trigger dodge the other's budget.
+- **Resilience** (`src/retail_agent/resilience.py`): every Gemini and BigQuery call goes
+  through retry-with-backoff (transient errors only, by message-pattern match) plus a
+  circuit breaker that opens after repeated failures rather than retrying forever — 5
+  tests, including one that proves the breaker actually blocks a call once open.
+  **Simplified from the original plan:** a per-turn token/cost budget guard was scoped
+  down to the bounded-attempt-count guard above, which already bounds cost by
+  construction; a precise token/dollar tracker was cut for time, not forgotten.
+- **Checkpointer**: `langgraph-checkpoint-sqlite` (a dependency the original plan didn't
+  list — `langgraph` doesn't bundle a SQLite checkpointer itself) persists state per
+  `session_id`; a real multi-turn exchange confirmed it works as designed.
+- **CLI** (`src/retail_agent/cli.py`, `rich` + `prompt_toolkit`): a real bug surfaced
+  immediately on first run — `prompt_toolkit.PromptSession` requires a real console and
+  raises `NoConsoleScreenBufferError` under a piped/redirected terminal; fixed with a
+  fallback to plain `input()` so the CLI degrades instead of crashing (requirement 5 in
+  the CLI layer itself, not just the agent logic).
+- **Two more real bugs, found only by actually running a live conversation:**
+  1. `GenerateContentConfig`'s `system_instruction` needs Gemini's `v1beta` API — the
+     default `v1` rejects it outright. Fixed by pinning `HttpOptions(api_version="v1beta")`.
+  2. `gemini-2.5-pro` (Day 1's pin, re-confirmed live that day) stopped being callable for
+     this account by Day 4 — "no longer available to new users." Re-queried the live
+     catalog rather than guessing a replacement, and switched both model constants to
+     the `-latest` aliases (`gemini-flash-latest`, `gemini-pro-latest`) instead of another
+     dated pin, specifically so this class of deprecation doesn't recur. Documented as a
+     correction to ADR-002.
+  3. The checkpointer logged a deprecation warning serializing the custom
+     `GoldenBucketTrio` dataclass directly into state; fixed by storing plain dicts in
+     `AgentState` instead, closing it before it becomes a hard failure in a future
+     `langgraph` version.
+- **Real conversation transcripts** (`exec-apparel` unless noted):
+  - *"Who are our top 5 customers by total spend?"* → real SQL generated and executed
+    against masked, live BigQuery data; a synthesized report with real numbers and
+    action items.
+  - *"What's the weather like today?"* → correctly rejected: "I'm a retail
+    data-analysis assistant -- ask about orders, products, or sales."
+  - *"Who are our top 3 customers by spend?"* then *"And what about the lowest 3?"* →
+    the follow-up was correctly understood as "lowest 3 by spend" from session history,
+    without restating the question — multi-turn memory confirmed working, not assumed.
+  - *`exec-intimates`*, *"What are my top selling products?"* → results were
+    products from Underwear/Sleep & Lounge only, never apparel categories belonging to
+    `exec-apparel` — the per-user ACL (requirement 2) holding under the actual agent
+    path, not just the isolated BigQuery test from Day 3.
+- **Diagrams**: the Day 2 flowchart gained colored subgraph styling, and a new sequence
+  diagram (`docs/architecture.md` §1a) documents the real turn-by-turn message flow —
+  both render-verified for real (Mermaid Live Editor), not just written.
+- `ruff check`, `ruff format`, `mypy src` all clean; 39 tests passing (32 unit/offline +
+  7 integration) after the brand-ACL rework below.
+
+### Day 4 addendum — client answers to the open questions, and a real design correction (2026-11-19)
+
+Asked the client (Harry, Vlad) the questions flagged as open throughout Days 2–4, per the
+brief's own invitation ("feel free to ask... we are the client"). Three confirmed the
+design as built; one changed it materially:
+
+- **Access is by brand, not category** (Harry): "each manager can analyze only the
+  brands they manage, and the CEO sees everything. A scoped user sees only totals for
+  their own brands, and customer and order data are visible only through purchases of
+  in-scope products." This is a real correction, not a confirmation — Day 2–3 built the
+  ACL on `product_category`, and `vw_orders`/`vw_users_masked` were originally meant to
+  stay freely queryable. Reworked for real: `user_brand_access` (renamed from
+  `user_product_access`), two new functions (`fn_orders_for_user`,
+  `fn_customers_for_user`) so orders/customers are only reachable through an in-scope
+  purchase, a `'ceo'` bypass instead of seeding ~2,800 brand rows, the SQL validator's
+  whitelist narrowed to zero base views (functions only), the prompt rules updated, all
+  20 Golden Bucket trios' SQL rewritten and re-embedded, and every test updated — see
+  [ADR-004](docs/decisions/ADR-004-per-user-product-acl.md) for the full before/after.
+  Re-verified live: `mgr-denim` sees exactly `{Calvin Klein, Levi's}`, `'ceo'` sees every
+  brand, `fn_orders_for_user` returns strictly between zero and the unscoped total — and
+  a real CLI conversation as `mgr-denim` answered correctly scoped to just those brands.
+- **"This conversation" = current session only** (Vlad) — confirms the Day 2 design
+  (session-scoped, via `session_id`) exactly as built; no change needed.
+- **Golden Bucket scale** (Harry) — "a small seeded set with retrieval in the prototype
+  is welcome but not required... the main focus is the design." Confirms Day 3's 20-trio
+  seed set was the right scope; no change needed.
+- **Persona tone example** (Vlad) — "one week short, numbers-first summaries, the next a
+  longer narrative... a non-developer makes the change, no code edits or redeploy."
+  Confirms the Day 5 `persona.yaml` design direction (external config, hot-reloaded) with
+  a concrete example to validate it against once built.
 
 ---
 

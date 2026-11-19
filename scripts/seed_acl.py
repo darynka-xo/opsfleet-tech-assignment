@@ -1,4 +1,4 @@
-"""Seed `user_product_access` with demo executive users and category assignments.
+"""Seed `user_brand_access` with demo brand-manager users.
 
 Admin-only, same as scripts/apply_bigquery_ddl.py. Idempotent: deletes each demo user's
 prior rows before inserting, so re-running updates the assignment instead of duplicating
@@ -16,22 +16,26 @@ from google.cloud import bigquery
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
-TABLE = "opsfleet-tech-assignment.retail_analytics.user_product_access"
+TABLE = "opsfleet-tech-assignment.retail_analytics.user_brand_access"
 
-# Demo executive users and the product categories each may analyze (requirement 2,
-# "products related to him"). thelook_ecommerce has no real owner/rep relationship, so
-# this is a documented synthetic mapping (AGENTS.md's open assumptions). Category values
-# are the real distinct `products.category` values (verified live, 2026-11-19) -- not
-# guessed; this dataset has no "Shoes"/"Jewelry"/"Sunglasses" category at all.
+# 'ceo' is a reserved app_user_id meaning "every brand" -- a bypass condition inside each
+# fn_*_for_user function (sql/bigquery_views.sql), never seeded as ~2,800 ACL rows here.
+CEO_USER_ID = "ceo"
+
+# Demo brand-manager users and the brands each may analyze (requirement 2, confirmed
+# answer 2026-11-19: access is by brand, "each manager can analyze only the brands they
+# manage"). thelook_ecommerce has no real manager/brand relationship, so this is a
+# documented synthetic mapping (AGENTS.md's open assumptions). Brand values are the real
+# distinct `products.brand` values (verified live, 2026-11-19), not guessed.
 DEMO_ACCESS = {
-    "exec-apparel": ["Jeans", "Outerwear & Coats", "Swim", "Sweaters", "Dresses"],
-    "exec-accessories": ["Accessories", "Fashion Hoodies & Sweatshirts", "Tops & Tees", "Leggings"],
-    "exec-intimates": ["Socks", "Socks & Hosiery", "Underwear", "Intimates", "Sleep & Lounge"],
+    "mgr-denim": ["Calvin Klein", "Levi's"],
+    "mgr-outdoor": ["Carhartt", "Volcom", "Nautica", "Quiksilver"],
+    "mgr-basics": ["Hanes"],
 }
 
 
 def main() -> None:
-    """Replace each demo user's rows in `user_product_access`."""
+    """Replace each demo user's rows in `user_brand_access`."""
     client = bigquery.Client(project="opsfleet-tech-assignment")
     now = datetime.now(UTC).isoformat()
 
@@ -40,14 +44,15 @@ def main() -> None:
     logger.info("Cleared prior rows for %d demo users", len(DEMO_ACCESS))
 
     rows = [
-        {"app_user_id": user, "product_category": category, "granted_at": now}
-        for user, categories in DEMO_ACCESS.items()
-        for category in categories
+        {"app_user_id": user, "brand": brand, "granted_at": now}
+        for user, brands in DEMO_ACCESS.items()
+        for brand in brands
     ]
     errors = client.insert_rows_json(TABLE, rows)
     if errors:
         raise RuntimeError(f"Failed to insert ACL rows: {errors}")
-    logger.info("Inserted %d (user, category) grants for %d users", len(rows), len(DEMO_ACCESS))
+    logger.info("Inserted %d (user, brand) grants for %d users", len(rows), len(DEMO_ACCESS))
+    logger.info("%r needs no seeding -- it bypasses the ACL in every fn_*_for_user", CEO_USER_ID)
 
 
 if __name__ == "__main__":
