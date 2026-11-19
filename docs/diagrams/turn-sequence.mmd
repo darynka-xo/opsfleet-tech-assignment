@@ -1,0 +1,54 @@
+sequenceDiagram
+    box rgb(255,243,224) Client
+        actor Person
+        participant CLI as CLI chat loop
+    end
+    box rgb(224,247,250) Orchestrator
+        participant Agent as LangGraph agent
+    end
+    box rgb(252,228,236) LLM
+        participant Gemini
+    end
+    box rgb(232,245,233) Golden Bucket
+        participant Qdrant
+    end
+    box rgb(255,249,196) Data layer
+        participant BQ as BigQuery
+    end
+
+    Person->>CLI: "Who are our top 5 customers by spend?"
+    CLI->>Agent: invoke(question, thread_id=session_id)
+
+    Agent->>Gemini: classify intent (router)
+    Gemini-->>Agent: ANALYSIS
+
+    alt off-topic or unsafe
+        Agent->>Gemini: safety check (guardrail)
+        Gemini-->>Agent: UNSAFE
+        Agent-->>CLI: polite refusal, logged
+    else on-topic and safe
+        Agent->>Gemini: safety check (guardrail)
+        Gemini-->>Agent: SAFE
+        Agent->>Gemini: embed(question)
+        Gemini-->>Agent: embedding vector
+        Agent->>Qdrant: query(embedding, top_k=5, diversity-capped)
+        Qdrant-->>Agent: Golden Bucket examples
+
+        loop self-correction, bounded at 3 attempts total
+            Agent->>Gemini: generate SQL (schema + examples + question + prior error)
+            Gemini-->>Agent: candidate SQL
+            Agent->>Agent: validate_sql — table/function whitelist, SELECT-only
+            Agent->>BQ: dry run
+            BQ-->>Agent: ok, or a syntax/permission error
+            Agent->>BQ: execute
+            BQ-->>Agent: result rows, or an error
+            Note over Agent: a validation failure, dry-run error, execution<br/>error, or empty result feeds back as another attempt
+        end
+
+        Agent->>Gemini: synthesize report (question + rows + style examples)
+        Gemini-->>Agent: report text, or "NEEDS_MORE_DATA: ..."
+        Note over Agent,Gemini: NEEDS_MORE_DATA shares the same attempt<br/>budget as the loop above — never a separate, unbounded one
+        Agent-->>CLI: final_answer
+    end
+
+    CLI-->>Person: rendered report (Rich markdown)

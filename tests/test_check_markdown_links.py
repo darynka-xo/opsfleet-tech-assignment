@@ -27,6 +27,23 @@ def test_missing_relative_link_is_flagged(tmp_path: Path) -> None:
     assert broken_links(doc) == ["missing.md"]
 
 
+def test_valid_relative_image_is_not_flagged(tmp_path: Path) -> None:
+    """A relative image embed pointing at a file that exists is not reported."""
+    (tmp_path / "diagram.png").write_bytes(b"\x89PNG")
+    doc = tmp_path / "doc.md"
+    doc.write_text("![alt](diagram.png)", encoding="utf-8")
+
+    assert broken_links(doc) == []
+
+
+def test_missing_relative_image_is_flagged(tmp_path: Path) -> None:
+    """A relative image embed pointing at a file that does not exist is reported."""
+    doc = tmp_path / "doc.md"
+    doc.write_text("![alt](missing.png)", encoding="utf-8")
+
+    assert broken_links(doc) == ["missing.png"]
+
+
 def test_external_and_anchor_links_are_ignored(tmp_path: Path) -> None:
     """External URLs, mailto links, and in-page anchors are never checked."""
     doc = tmp_path / "doc.md"

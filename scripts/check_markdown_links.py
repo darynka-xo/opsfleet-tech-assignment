@@ -10,7 +10,10 @@ from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
-LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+# No `(?<!!)` exclusion: an `![alt](path)` image embed is just as broken as a `[text](path)`
+# link if the path doesn't resolve -- found while adding docs/images/*.png, which this
+# checker had never actually been validating.
+LINK = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 FENCE = re.compile(r"```.*?```", re.DOTALL)
 EXTERNAL = re.compile(r"^(https?:|mailto:|#)")
 

@@ -9,61 +9,12 @@ to where it's actually addressed.
 
 ## 1. System diagram
 
-```mermaid
-flowchart TB
-    User(["User — CLI"]) <--> CLI["CLI chat loop<br/>rich + prompt_toolkit"]
-    CLI <--> Router
+![System diagram: CLI through the LangGraph orchestrator to Qdrant, BigQuery, SQLite, and the observability sink](images/system-diagram.png)
 
-    subgraph Graph["LangGraph orchestrator — checkpointed, multi-turn"]
-        direction TB
-        Router["Intent Router"]
-        Guard["Safety / Guardrail Gate"]
-        Reject["Polite refusal — logged"]
-        Retrieve["Golden Bucket Retriever"]
-        GenSQL["SQL Generator — Gemini 2.5 Flash"]
-        Validate["SQL Validator — sqlglot, SELECT-only, view whitelist"]
-        DryRun["BigQuery Dry Run"]
-        Execute["BigQuery Execute"]
-        SelfCorrect{"Error, empty, or more data needed?"}
-        Synthesize["Report Synthesizer — Gemini 2.5 Pro"]
-        DeleteParse["Delete-Intent Parser"]
-        ResolveCand["Candidate Resolver"]
-        Confirm{"Explicit confirmation"}
-        Persist["Persist report / Soft-delete + audit"]
-
-        Router -->|analysis question| Guard
-        Router -->|delete request| DeleteParse
-        Guard -->|off-topic or injection| Reject
-        Guard -->|on-topic| Retrieve
-        Retrieve --> GenSQL
-        GenSQL --> Validate
-        Validate -->|rejected| GenSQL
-        Validate -->|accepted| DryRun
-        DryRun -->|fails| SelfCorrect
-        DryRun -->|ok| Execute
-        Execute --> SelfCorrect
-        SelfCorrect -->|retry, bounded| GenSQL
-        SelfCorrect -->|ok or retries exhausted| Synthesize
-        Synthesize --> Persist
-        DeleteParse --> ResolveCand
-        ResolveCand --> Confirm
-        Confirm -->|confirmed| Persist
-        Confirm -->|cancelled| CLI
-    end
-
-    Retrieve <--> Qdrant[("Qdrant — Golden Bucket vectors")]
-    GenSQL -.->|live schema| SchemaTool["BigQuery get_table_schema"]
-    Execute <--> BQ[("BigQuery — retail_analytics views + ACL")]
-    Persist <--> SQLite[("Local SQLite — reports, profiles, feedback")]
-    Graph -.->|gen_ai.* spans, structured logs| Otel["Observability sink"]
-
-    style Graph fill:#e0f7fa,stroke:#00838f
-    style Qdrant fill:#e8f5e9,stroke:#2e7d32
-    style BQ fill:#fff8e1,stroke:#f9a825
-    style SQLite fill:#fff8e1,stroke:#f9a825
-    style Otel fill:#f3e5f5,stroke:#6a1b9a
-    style CLI fill:#fce4ec,stroke:#ad1457
-```
+Rendered to PNG (white background, so it reads the same in any viewer/theme) from its
+Mermaid source at [diagrams/system-diagram.mmd](diagrams/system-diagram.mmd). Regenerate
+after editing the source with Mermaid Live Editor (<https://mermaid.live>) or
+`npx @mermaid-js/mermaid-cli -i diagrams/system-diagram.mmd -o images/system-diagram.png -b white`.
 
 ## 1a. Turn sequence (Day 4, as actually built and run)
 
@@ -71,62 +22,10 @@ Same graph as above, shown as the message sequence for one real turn — the two
 branches are exactly what `src/retail_agent/graph.py` does, verified by running the
 live CLI, not just designed on paper (see PLANNING.md's Day 4 results for the transcripts).
 
-```mermaid
-sequenceDiagram
-    box rgb(255,243,224) Client
-        actor Person
-        participant CLI as CLI chat loop
-    end
-    box rgb(224,247,250) Orchestrator
-        participant Agent as LangGraph agent
-    end
-    box rgb(252,228,236) LLM
-        participant Gemini
-    end
-    box rgb(232,245,233) Golden Bucket
-        participant Qdrant
-    end
-    box rgb(255,249,196) Data layer
-        participant BQ as BigQuery
-    end
+![Turn sequence diagram: Person through CLI, LangGraph agent, Gemini, Qdrant, and BigQuery for one real turn](images/turn-sequence.png)
 
-    Person->>CLI: "Who are our top 5 customers by spend?"
-    CLI->>Agent: invoke(question, thread_id=session_id)
-
-    Agent->>Gemini: classify intent (router)
-    Gemini-->>Agent: ANALYSIS
-
-    alt off-topic or unsafe
-        Agent->>Gemini: safety check (guardrail)
-        Gemini-->>Agent: UNSAFE
-        Agent-->>CLI: polite refusal, logged
-    else on-topic and safe
-        Agent->>Gemini: safety check (guardrail)
-        Gemini-->>Agent: SAFE
-        Agent->>Gemini: embed(question)
-        Gemini-->>Agent: embedding vector
-        Agent->>Qdrant: query(embedding, top_k=5, diversity-capped)
-        Qdrant-->>Agent: Golden Bucket examples
-
-        loop self-correction, bounded at 3 attempts total
-            Agent->>Gemini: generate SQL (schema + examples + question + prior error)
-            Gemini-->>Agent: candidate SQL
-            Agent->>Agent: validate_sql — table/function whitelist, SELECT-only
-            Agent->>BQ: dry run
-            BQ-->>Agent: ok, or a syntax/permission error
-            Agent->>BQ: execute
-            BQ-->>Agent: result rows, or an error
-            Note over Agent: a validation failure, dry-run error, execution<br/>error, or empty result feeds back as another attempt
-        end
-
-        Agent->>Gemini: synthesize report (question + rows + style examples)
-        Gemini-->>Agent: report text, or "NEEDS_MORE_DATA: ..."
-        Note over Agent,Gemini: NEEDS_MORE_DATA shares the same attempt<br/>budget as the loop above — never a separate, unbounded one
-        Agent-->>CLI: final_answer
-    end
-
-    CLI-->>Person: rendered report (Rich markdown)
-```
+Source: [diagrams/turn-sequence.mmd](diagrams/turn-sequence.mmd); regenerate the same way
+as the diagram above.
 
 ## 2. Data flow walkthrough (one turn, end to end)
 

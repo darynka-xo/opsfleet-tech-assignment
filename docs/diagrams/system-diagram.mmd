@@ -1,0 +1,53 @@
+flowchart TB
+    User(["User — CLI"]) <--> CLI["CLI chat loop<br/>rich + prompt_toolkit"]
+    CLI <--> Router
+
+    subgraph Graph["LangGraph orchestrator — checkpointed, multi-turn"]
+        direction TB
+        Router["Intent Router"]
+        Guard["Safety / Guardrail Gate"]
+        Reject["Polite refusal — logged"]
+        Retrieve["Golden Bucket Retriever"]
+        GenSQL["SQL Generator — Gemini 2.5 Flash"]
+        Validate["SQL Validator — sqlglot, SELECT-only, view whitelist"]
+        DryRun["BigQuery Dry Run"]
+        Execute["BigQuery Execute"]
+        SelfCorrect{"Error, empty, or more data needed?"}
+        Synthesize["Report Synthesizer — Gemini 2.5 Pro"]
+        DeleteParse["Delete-Intent Parser"]
+        ResolveCand["Candidate Resolver"]
+        Confirm{"Explicit confirmation"}
+        Persist["Persist report / Soft-delete + audit"]
+
+        Router -->|analysis question| Guard
+        Router -->|delete request| DeleteParse
+        Guard -->|off-topic or injection| Reject
+        Guard -->|on-topic| Retrieve
+        Retrieve --> GenSQL
+        GenSQL --> Validate
+        Validate -->|rejected| GenSQL
+        Validate -->|accepted| DryRun
+        DryRun -->|fails| SelfCorrect
+        DryRun -->|ok| Execute
+        Execute --> SelfCorrect
+        SelfCorrect -->|retry, bounded| GenSQL
+        SelfCorrect -->|ok or retries exhausted| Synthesize
+        Synthesize --> Persist
+        DeleteParse --> ResolveCand
+        ResolveCand --> Confirm
+        Confirm -->|confirmed| Persist
+        Confirm -->|cancelled| CLI
+    end
+
+    Retrieve <--> Qdrant[("Qdrant — Golden Bucket vectors")]
+    GenSQL -.->|live schema| SchemaTool["BigQuery get_table_schema"]
+    Execute <--> BQ[("BigQuery — retail_analytics views + ACL")]
+    Persist <--> SQLite[("Local SQLite — reports, profiles, feedback")]
+    Graph -.->|gen_ai.* spans, structured logs| Otel["Observability sink"]
+
+    style Graph fill:#e0f7fa,stroke:#00838f
+    style Qdrant fill:#e8f5e9,stroke:#2e7d32
+    style BQ fill:#fff8e1,stroke:#f9a825
+    style SQLite fill:#fff8e1,stroke:#f9a825
+    style Otel fill:#f3e5f5,stroke:#6a1b9a
+    style CLI fill:#fce4ec,stroke:#ad1457
