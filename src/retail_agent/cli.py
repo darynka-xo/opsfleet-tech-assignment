@@ -21,6 +21,7 @@ from prompt_toolkit import PromptSession
 from rich.console import Console
 from rich.markdown import Markdown
 
+from retail_agent import feedback
 from retail_agent.data.bq_client import BigQueryRunner
 from retail_agent.golden_bucket.qdrant_store import QdrantGoldenBucketStore
 from retail_agent.graph import AgentDependencies, build_graph
@@ -170,6 +171,23 @@ def main(argv: list[str] | None = None) -> None:
                 continue
 
             console.print(Markdown(result.get("final_answer") or "(no answer produced)"))
+
+            # Only analysis turns produce something worth rating -- an off-topic rejection
+            # or a delete confirmation already got its own yes/no exchange above.
+            if result.get("intent") == "analysis":
+                console.print("[dim]Rate this answer: + (up) / - (down) / Enter to skip[/]")
+                rating_input = read_line().strip()
+                if rating_input in {"+", "-"}:
+                    feedback.record_feedback(
+                        app_db,
+                        app_user_id=args.user,
+                        session_id=session_id,
+                        turn_id=turn_input["turn_id"],
+                        rating="up" if rating_input == "+" else "down",
+                        question=question,
+                        sql_query=result.get("sql"),
+                        report_body=result.get("final_answer"),
+                    )
             console.print()
 
 

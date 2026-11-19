@@ -319,7 +319,8 @@ confirmed.
 
 ## 6. Requirement 6 deep dive — quality assurance approach
 
-Full implementation is Day 6; the design commitment made now:
+Implemented Day 6 (`scripts/run_eval.py`, `data/eval_regression_set.yaml`); see
+[PLANNING.md](../PLANNING.md)'s Day 6 results for the actual numbers.
 
 - **SQL execution accuracy** — does generated SQL run without error and return a
   non-empty result for questions that should have one, against a held-out regression set
@@ -327,9 +328,13 @@ Full implementation is Day 6; the design commitment made now:
   generalization, not memorized retrieval).
 - **Result correctness** — regression-set questions get a known-correct expected answer
   (computed once, by hand, against the real data) to diff the agent's result against.
+  **Real lesson from building this (Day 6):** the first hand-computed expected value for a
+  "revenue this year" question didn't itself apply a "this year" filter, so it flagged a
+  *correct* agent answer as wrong -- caught by actually re-verifying the failing case
+  against live BigQuery rather than assuming the harness was right. The fix was to the
+  regression set's own ground truth, not the agent.
 - **Report quality** — an LLM-as-judge rubric (faithfulness to the underlying data,
-  relevance to the question asked, adherence to the user's stated format preference) for
-  the parts correctness alone can't capture.
+  relevance to the question asked, clarity) for the parts correctness alone can't capture.
 - **UX evaluation** — manual QA pass (Day 7) across edge cases: ambiguous questions,
   injected SQL errors, simulated API downtime, off-topic/adversarial prompts, a
   destructive op with zero matches, a destructive op the user cancels, and cross-user ACL
@@ -337,29 +342,42 @@ Full implementation is Day 6; the design commitment made now:
 
 ## 7. Requirement 7 deep dive — observability
 
-Full implementation is Day 6; metrics tracked, defined now so Day 6 instruments against a
-spec rather than whatever's convenient:
+Implemented Day 6 (`src/retail_agent/telemetry.py`, `agent_events` in
+`sql/app_state.sql`, `scripts/metrics_rollup.py`):
 
-- **Per-turn:** SQL self-correction retry count, guardrail-block flag, end-to-end
-  latency, token/cost spend, whether the turn ended in a graceful fallback.
+- **Per-turn:** SQL self-correction retry count, guardrail-block flag, per-node and
+  end-to-end latency, whether the turn ended in a graceful fallback.
 - **Per-session:** turn count, destructive-ops attempted vs. confirmed vs. cancelled,
   feedback rate (👍/👎 per answer given).
 - **System-level (rollup):** SQL success rate, average self-correction retries, guardrail
-  block rate, cost per session.
+  block rate.
+- **Simplified from the original plan:** token/cost spend (per-turn and per-session) was
+  cut for time, the same documented tradeoff as Day 4's budget guard --
+  `LLMClient.generate()` doesn't expose token usage yet, so there's nothing to roll up
+  without first extending that interface. Bounded self-correction attempts (`generate_sql`
+  retries) already bound cost by construction even without a precise dollar figure.
 
 **Deep-dive/debugging support:** every node emits an OTel-style span (`gen_ai.*`-style
 attributes) plus a structured JSON log line, correlated by `session_id`/`turn_id`/
-`trace_id`. Pulling a `trace_id` surfaces every node's input/output for that turn in
-order — this is "what went wrong," not just "something went wrong," satisfying the
-brief's explicit "understanding what the message correspondence is."
+`trace_id` (`trace_id` equals `turn_id` in this prototype -- one process, no distributed
+call graph to disambiguate, so a second id would track one-for-one with `turn_id` and add
+nothing real). Pulling a `trace_id` surfaces every node's execution in order -- which
+node ran, how long it took, and a curated set of outcome attributes (the generated SQL
+text on the SQL-pipeline nodes, row counts, error/blocked flags, retry counts) -- "what
+went wrong," not just "something went wrong," satisfying the brief's explicit
+"understanding what the message correspondence is." **Scoped down from the original plan:**
+the full synthesized report text is deliberately *not* duplicated into every trace line
+(it's recoverable from `saved_reports`/`feedback` for any turn that needs it) -- a trace
+shows the shape of what happened at each node, not a second copy of the whole
+conversation.
 
 **Log/trace safety, not just app safety.** Requirement 2's PII ban doesn't stop at the
 user-facing output — a span or log line that captures a node's raw "output" must never
 capture a raw BigQuery result row (only row/column counts, timing, and the query text
 itself, which is already PII-free since it can only reference the masked views). The
-generated SQL text and the synthesized report are safe to log in full; query *results*
-are not. This is a logging-layer rule (AGENTS.md), not something left to each node to
-decide case by case.
+generated SQL text is safe to log in full and is logged in full; query *results* are not.
+This is a logging-layer rule (AGENTS.md), not something left to each node to decide case
+by case.
 
 ## 8. Requirement 8 — persona/agility management
 

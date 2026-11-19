@@ -64,3 +64,26 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 
 CREATE INDEX IF NOT EXISTS idx_feedback_rating ON feedback (rating, created_at);
+
+-- Requirement 7 (observability). One row per graph-node execution, the source for every
+-- rollup metric in docs/architecture.md section 7 (SQL success rate, self-correction
+-- retry rate, latency per node, guardrail block rate). `attributes` is a small, curated
+-- JSON object per node (counts, booleans, the SQL attempt number) -- never raw query
+-- results or full report/SQL text, per AGENTS.md's "no raw query results in logs or
+-- traces." `trace_id` equals `turn_id` in this prototype: a single process handling one
+-- turn at a time has no distributed call graph to disambiguate, so a second identifier
+-- would track turn_id one-for-one and add nothing real (a genuine multi-service
+-- deployment would reintroduce a distinct trace_id).
+CREATE TABLE IF NOT EXISTS agent_events (
+    event_id    TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    turn_id     TEXT NOT NULL,
+    trace_id    TEXT NOT NULL,
+    node_name   TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    attributes  TEXT NOT NULL,  -- JSON object, node-specific, never row content
+    occurred_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_events_trace ON agent_events (trace_id);
+CREATE INDEX IF NOT EXISTS idx_agent_events_node ON agent_events (node_name, occurred_at);

@@ -1,0 +1,52 @@
+# Held-out eval regression set (requirement 6), distinct from data/golden_bucket_trios.yaml
+# -- these questions are never shown to the SQL Generator as few-shot examples, so scoring
+# them tests generalization, not memorized retrieval.
+#
+# `expected_value`/`tolerance_pct` hand-verified against live BigQuery on 2026-11-19 (see
+# PLANNING.md's Day 6 results for the exact verification queries); `expect_answer_contains`
+# is a case-insensitive substring check for questions whose correct answer is categorical,
+# not numeric. Every case's `app_user_id` also doubles as a live brand-ACL check: a case
+# whose SQL result includes a brand outside that user's grant is a result-correctness
+# failure, not just a quality one.
+
+- case_id: er-001
+  capability_area: product_performance
+  app_user_id: mgr-denim
+  question: "What is our total revenue this year, excluding cancelled orders?"
+  expected_value: 94094.32
+  tolerance_pct: 5
+
+- case_id: er-002
+  capability_area: product_performance
+  app_user_id: mgr-denim
+  question: "Which of our brands brings in more revenue, Calvin Klein or Levi's?"
+  expect_answer_contains: ["Calvin Klein"]
+
+- case_id: er-003
+  capability_area: schema_meta
+  app_user_id: mgr-outdoor
+  question: "How many distinct brands do I have access to?"
+  expected_value: 4
+  tolerance_pct: 0
+
+- case_id: er-004
+  capability_area: customer_behavior
+  app_user_id: mgr-basics
+  question: "How many orders have included a Hanes product?"
+  expected_value: 1961
+  tolerance_pct: 5
+
+- case_id: er-005
+  capability_area: product_performance
+  app_user_id: ceo
+  question: >-
+    What is our combined total revenue across every brand, excluding cancelled orders --
+    give me that single grand-total number, not a breakdown by brand?
+  expected_value: 9161833.67
+  tolerance_pct: 5
+
+- case_id: er-006
+  capability_area: time_based
+  app_user_id: mgr-denim
+  question: "Of our two brands, which one has grown faster over the last two years?"
+  expect_answer_contains: ["Calvin Klein", "Levi's"]

@@ -129,3 +129,19 @@ class QdrantGoldenBucketStore:
                 )
             )
         return selected
+
+    def best_match_similarity(self, embedding: list[float]) -> float | None:
+        """Cosine similarity to the single nearest *approved* trio, or `None` if empty.
+
+        Used by `scripts/curate_golden_bucket_candidates.py` (requirement 4b) as a novelty
+        check: a 👍-rated question that's nearly identical to an already-approved trio
+        isn't a useful new example, however positively it was rated.
+        """
+        status_condition = FieldCondition(key="status", match=MatchValue(value="approved"))
+        hits = self._client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=embedding,
+            query_filter=Filter(must=[status_condition]),
+            limit=1,
+        ).points
+        return hits[0].score if hits else None

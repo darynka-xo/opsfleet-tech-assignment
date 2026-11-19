@@ -15,14 +15,17 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
+from collections.abc import Callable
 from dataclasses import asdict
+from typing import Any
 
 from google.cloud import bigquery
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from retail_agent import persona as persona_module
-from retail_agent import profiles, reports
+from retail_agent import profiles, reports, telemetry
 from retail_agent.data.bq_client import BigQueryRunner
 from retail_agent.data.schema_context import build_schema_context
 from retail_agent.golden_bucket.qdrant_store import QdrantGoldenBucketStore
@@ -40,6 +43,48 @@ from retail_agent.sql_validator import validate_sql
 from retail_agent.state import AgentState
 
 logger = logging.getLogger(__name__)
+
+NodeFunc = Callable[[AgentState], dict[str, object]]
+
+# A curated set of safe fields per node -- counts, booleans, short enums, and (per
+# AGENTS.md's Security section) the generated SQL *text* itself, which is explicitly
+# allowed in logs/traces ("may record a SQL query's text, its timing, and its row/column
+# count -- never the row content"). Never a raw query result or the full report text: the
+# report is already recoverable from `saved_reports`/`feedback` for any turn that needs
+# deeper inspection, so it isn't duplicated into every trace line. Nodes not listed here
+# get no attributes beyond the generic timing every node already records.
+_AttributeExtractor = Callable[[AgentState, dict[str, object]], dict[str, object]]
+_NODE_ATTRIBUTE_EXTRACTORS: dict[str, _AttributeExtractor] = {
+    "route_intent": lambda s, u: {"intent": u.get("intent")},
+    "guardrail": lambda s, u: {"blocked": u.get("rejection_reason") == "safety"},
+    "retrieve_golden_bucket": lambda s, u: {
+        "trio_count": len(u.get("retrieved_trios") or [])  # type: ignore[arg-type]
+    },
+    "generate_sql": lambda s, u: {"sql_attempts": u.get("sql_attempts"), "sql": u.get("sql")},
+    "validate": lambda s, u: {"error": u.get("last_error") is not None, "sql": s.get("sql")},
+    "dry_run": lambda s, u: {"error": u.get("last_error") is not None, "sql": s.get("sql")},
+    "execute": lambda s, u: {
+        "error": u.get("last_error") is not None,
+        "row_count": u.get("query_row_count"),
+        "sql": s.get("sql"),
+    },
+    "synthesize": lambda s, u: {"needs_more_data": u.get("needs_more_data_reason") is not None},
+    "fallback": lambda s, u: {"triggered": True},
+    "parse_delete": lambda s, u: {"filter_kind": u.get("delete_filter_kind")},
+    "resolve_candidates": lambda s, u: {
+        "candidate_count": len(u.get("delete_candidates") or [])  # type: ignore[arg-type]
+    },
+    "confirm_delete": lambda s, u: {"confirmed": u.get("delete_confirmed")},
+}
+
+
+def _node_attributes(
+    node_name: str, state: AgentState, update: dict[str, object]
+) -> dict[str, object]:
+    """Extract the curated, safe telemetry payload for one node's execution."""
+    extractor = _NODE_ATTRIBUTE_EXTRACTORS.get(node_name)
+    return extractor(state, update) if extractor else {}
+
 
 # A saved report's title is the question that produced it, truncated -- short enough to
 # scan in a candidate list, long enough to tell two reports apart.
@@ -306,22 +351,57 @@ def build_graph(deps: AgentDependencies) -> StateGraph:
             return "fallback"
         return "generate_sql"
 
+    def _instrumented(node_name: str, fn: NodeFunc) -> Any:  # noqa: ANN401 - see docstring
+        """Wrap a node so every execution lands in `agent_events`, timed and attributed.
+
+        A single generic wrapper applied at graph-build time, rather than instrumenting
+        each node body by hand -- the per-node payload itself still varies (via
+        `_node_attributes`), but the timing/persistence plumbing doesn't, so it isn't
+        repeated fifteen times.
+
+        Returns `Any`, not `NodeFunc`: `StateGraph.add_node` is heavily `@overload`ed on
+        its callable argument's exact shape, resolved via special-cased inference for an
+        inline function/lambda literal at the call site -- passing a same-shaped
+        `Callable` value through a helper like this one defeats that inference (a known
+        mypy limitation with this kind of overload set, not a real type error), so every
+        `add_node(...)` call below would otherwise need its own `# type: ignore`.
+        """
+
+        def wrapped(state: AgentState) -> dict[str, object]:
+            started = time.perf_counter()
+            update = fn(state)
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            telemetry.record_event(
+                deps.app_db,
+                session_id=state["session_id"],
+                turn_id=state["turn_id"],
+                trace_id=state["turn_id"],
+                node_name=node_name,
+                duration_ms=duration_ms,
+                attributes=_node_attributes(node_name, state, update),
+            )
+            return update
+
+        return wrapped
+
     graph = StateGraph(AgentState)
-    graph.add_node("learn_preferences", learn_preferences)
-    graph.add_node("route_intent", route_intent)
-    graph.add_node("guardrail", guardrail)
-    graph.add_node("reject", reject)
-    graph.add_node("parse_delete", parse_delete)
-    graph.add_node("resolve_candidates", resolve_candidates)
-    graph.add_node("confirm_delete", confirm_delete)
-    graph.add_node("persist_delete", persist_delete)
-    graph.add_node("retrieve_golden_bucket", retrieve_golden_bucket)
-    graph.add_node("generate_sql", generate_sql)
-    graph.add_node("validate", validate)
-    graph.add_node("dry_run", dry_run)
-    graph.add_node("execute", execute)
-    graph.add_node("synthesize", synthesize)
-    graph.add_node("fallback", fallback)
+    graph.add_node("learn_preferences", _instrumented("learn_preferences", learn_preferences))
+    graph.add_node("route_intent", _instrumented("route_intent", route_intent))
+    graph.add_node("guardrail", _instrumented("guardrail", guardrail))
+    graph.add_node("reject", _instrumented("reject", reject))
+    graph.add_node("parse_delete", _instrumented("parse_delete", parse_delete))
+    graph.add_node("resolve_candidates", _instrumented("resolve_candidates", resolve_candidates))
+    graph.add_node("confirm_delete", _instrumented("confirm_delete", confirm_delete))
+    graph.add_node("persist_delete", _instrumented("persist_delete", persist_delete))
+    graph.add_node(
+        "retrieve_golden_bucket", _instrumented("retrieve_golden_bucket", retrieve_golden_bucket)
+    )
+    graph.add_node("generate_sql", _instrumented("generate_sql", generate_sql))
+    graph.add_node("validate", _instrumented("validate", validate))
+    graph.add_node("dry_run", _instrumented("dry_run", dry_run))
+    graph.add_node("execute", _instrumented("execute", execute))
+    graph.add_node("synthesize", _instrumented("synthesize", synthesize))
+    graph.add_node("fallback", _instrumented("fallback", fallback))
 
     graph.add_edge(START, "learn_preferences")
     graph.add_edge("learn_preferences", "route_intent")
