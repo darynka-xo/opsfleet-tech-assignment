@@ -206,17 +206,75 @@ Covered in full in §2 above (this doc's §1–2 *are* technical-explanation sec
 | Question needs more than one query to actually answer (a comparison, a "why") | Same loop and same budget, triggered by the synthesizer instead of an error — see §2 step 7. Sharing the budget keeps "needs more data" from becoming a way around the retry cap. |
 | Gemini or BigQuery call fails transiently (timeout, 5xx, rate limit) | `tenacity`-based retry with exponential backoff and a circuit breaker per external call; distinct from the SQL self-correction loop above, which handles *logical* SQL failures, not *transport* failures. |
 | Retry budget exhausted | Graceful "I couldn't answer that" response, logged with the guardrail/observability metadata (requirement 7) for later debugging — the conversation continues normally on the next turn, never crashes the CLI. |
-| Per-turn cost/token runaway | A token/cost budget guard aborts a turn that exceeds its budget rather than letting a retry loop inflate costs silently (explicit brief concern under requirement 5). |
-| Destructive-op candidate set is empty | The confirmation step still fires, showing "0 reports match" — the user gets a clear answer, not a silent no-op. |
+| Per-turn cost runaway | The bounded self-correction attempt count (above) already bounds cost by construction; see §7's observability note on the token/cost-tracking scope cut. |
+| Destructive-op candidate set is empty | **Built differently than originally planned:** rather than still firing `interrupt()` to confirm "0 reports match," the Candidate Resolver returns a plain "I didn't find any matching saved reports to delete" and skips confirmation entirely — there's nothing to confirm, so asking anyway is extra friction for no reason, not extra safety. |
 | Destructive-op cancelled | No state change; audited as `delete_cancelled` in `report_audit_log` so the attempt itself is visible later, not just confirmed deletions. |
 
-## d. Setup instructions (skeleton)
+## d. Setup instructions and example run
 
-Finalized Day 7 once the CLI exists; the install/run instructions live in the
-[README](../README.md#development-setup) and will be extended with a pasted example run
-transcript once Day 4's CLI loop exists. Two environment variables
-(`GOOGLE_CLOUD_PROJECT`, `GEMINI_API_KEY`) are the only required setup beyond `pip
-install`, per [.env.example](../.env.example).
+Install/run instructions live in the
+[README](../README.md#development-setup) (`pip install`, `pip install -e .`, `pre-commit
+install`, fill in `.env`); only `GOOGLE_CLOUD_PROJECT` and `GEMINI_API_KEY` are required
+beyond that, per [.env.example](../.env.example). Start the CLI with
+`python -m retail_agent --user mgr-denim`.
+
+**Example run (real output, `mgr-denim` -- Calvin Klein + Levi's only), 2026-11-19:**
+
+```text
+> what's going on with our sales?
+Sales are on a strong upward trajectory, with monthly revenue more than
+doubling from $7,200.25 in June to $15,105.14 in November. Aside from a minor
+dip in September ($8,900.03, down from $9,790.43 in August), growth has been
+consistent and accelerated sharply over the last two months.
+
+Action items: Run a follow-up analysis breaking down the October and November
+revenue spikes by product category and customer type (new vs. returning) to
+isolate the exact growth drivers.
+
+> how much revenue did we make from Hanes products?
+We generated $0 in revenue from Hanes products. The data shows no non-cancelled
+sales on record for this brand.
+
+> who are our top 3 customers by spend?
+The top 3 customers by spend are User 71291 ($377.00), User 49508 ($330.00),
+and User 59 ($330.00). Spend among our highest-value buyers is tightly
+clustered, with only a $47 gap between the number one purchaser and the two
+tied for second place.
+
+> and what about the lowest 3?
+The three lowest-spending active customers in the 'mgr-denim' segment generated
+between $10 and $12 in total revenue. Specifically, users 325 and 27884 spent
+exactly $10.00 each, and user 350 spent $12.00.
+```
+
+Two things this one transcript demonstrates for real, not just by design: an ambiguous
+question ("what's going on with our sales?") gets a reasonable, data-grounded
+interpretation rather than a clarifying-question deadlock; and the brand-scoped ACL
+(requirement 2) holds even though `mgr-denim` never typed a brand name -- asking about
+Hanes (a brand `mgr-denim` has no access to) returns a truthful "$0," because the
+`fn_*_for_user` function it's scoped to simply never sees Hanes rows, not a leaked answer
+or a rejected question. The last two turns show session memory resolving "and what about
+the lowest 3?" against the prior turn's "top 3 customers" context.
+
+## e. Requirement-by-requirement walkthrough
+
+Each numbered requirement has its own deep-dive section above or below; this is a reading
+index, not a restatement. Each row is a pointer, not the full explanation -- read the
+linked section for the actual mechanism, and §10's traceability matrix for which day it
+landed and whether it was confirmed or corrected against a real client answer.
+
+| # | Requirement | Where it's actually explained |
+| --- | --- | --- |
+| 1 | Hybrid Intelligence (Golden Bucket) | §3 (retrieval + update mechanics) |
+| 2 | Safety & PII Masking | §4 (data layer), §a (guardrail), `sql/bigquery_views.sql` |
+| 3 | High-Stakes Oversight (destructive ops) | §5 (resolution semantics + confirmation integrity) |
+| 4 | Continuous Improvement (learning loop) | §3 (4b, system-level), `sql/app_state.sql`'s `user_profiles` comment (4a) |
+| 5 | Resilience & Graceful Error Handling | §c (error-handling table) |
+| 6 | Quality Assurance | §6 (eval approach + the first real baseline) |
+| 7 | Observability | §7 (metrics + trace/log design) |
+| 8 | Agility (persona management) | §8 |
+
+See §10 for the full traceability matrix (requirement → mechanism → day implemented).
 
 ## 3. Requirement 1 deep dive — Golden Bucket update and retrieval mechanics
 
@@ -300,13 +358,16 @@ this is a design decision made explicitly now, not improvised at Day 5's impleme
   never by re-matching report content — "this conversation" is a structural fact the
   system already tracks, not something to infer from text.
 
-Both paths converge on the same confirmation step: `interrupt()` shows the exact
-candidate list (title + id, not just a count) and requires an explicit "yes" before any
-write. Both are always scoped to `app_user_id = <requesting user>` — the resolver query
-itself excludes other users' reports, so there's no separate "can I see this report"
-check to forget. A cross-user delete attempt simply resolves to an empty or
-partial candidate set, which the confirmation step surfaces honestly ("0 reports match")
-rather than silently failing or revealing another user's report titles.
+Both paths converge on the same confirmation step when there's something to confirm:
+`interrupt()` shows the exact candidate list (title + id, not just a count) and requires
+an explicit "yes" before any write. Both are always scoped to `app_user_id = <requesting
+user>` — the resolver query itself excludes other users' reports, so there's no separate
+"can I see this report" check to forget. A cross-user delete attempt, or any delete with
+no real matches, simply resolves to an empty candidate set; **built differently than
+originally planned**, that case skips `interrupt()` entirely and returns a plain "I didn't
+find any matching saved reports to delete" rather than still firing the confirmation step
+to show "0 reports match" — there's nothing to confirm, so asking anyway is friction, not
+safety. Either way, nothing is silently failed or another user's report titles revealed.
 
 **Confirmation integrity.** The "yes" that resumes an `interrupt()` is a raw CLI input
 string, checked by orchestration code against an explicit allow-list (`yes`/`y`, exact
