@@ -28,7 +28,7 @@ dependencies = [
 retail-agent = "retail_agent.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=9.2,<10", "ruff==0.17.5", "mypy>=1.14,<2", "pre-commit>=4.0,<5"]
+dev = ["pytest>=9.2,<10", "ruff==0.17.5", "mypy>=2.4,<3", "pre-commit>=4.0,<5"]
 
 [build-system]
 requires = ["hatchling"]

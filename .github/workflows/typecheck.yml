@@ -21,6 +21,6 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
-      # Scoped to src/ only: bq_client.py is third-party (see AGENTS.md) and the rest of
-      # the agent doesn't exist yet (Day 1). Widen as real source code lands.
+      # Scoped to src/ only: bq_client.py is third-party (see AGENTS.md) and excluded via
+      # pyproject.toml's [tool.mypy] exclude/overrides.
       - run: mypy src
