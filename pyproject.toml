@@ -44,7 +44,18 @@ markers = ["integration: needs real GCP/Gemini access; opt-in"]
 [tool.mypy]
 python_version = "3.14"
 # bq_client.py is third-party (see AGENTS.md); not held to this project's strictness.
+# `exclude` alone is a file-path regex matched during directory discovery -- it turned out
+# to behave inconsistently between this project's two real environments (passed locally on
+# Windows, failed in CI on Linux with "Library stubs not installed for pandas", same mypy
+# version, same config, confirmed by actually running both, not assumed). An override keyed
+# by dotted module name is matched the same way regardless of OS or path separators, so it's
+# the authoritative suppression; `exclude` is kept too since it also skips bq_client.py when
+# mypy is invoked directly on that path.
 exclude = ["src/retail_agent/data/bq_client.py"]
+
+[[tool.mypy.overrides]]
+module = "retail_agent.data.bq_client"
+ignore_errors = true
 
 [tool.ruff]
 line-length = 100
