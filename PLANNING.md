@@ -491,3 +491,58 @@ Every piece below was verified for real: live CLI conversations, a live `scripts
 - Push to a public GitHub repo.
 
 **Done when:** a fresh machine can follow the README alone, install deps, set two env vars, and hold a working conversation with the agent.
+
+### Day 7 results (2026-11-19)
+
+- **Manual QA pass, done live, not by inspection:**
+  - *Ambiguous question* ("what's going on with our sales?") got a direct, data-grounded
+    monthly-revenue answer rather than stalling on a clarifying question.
+  - *Cross-user ACL probing at the analysis level* (not just delete, which Day 5 already
+    covered): asked `mgr-denim` (scoped to Calvin Klein + Levi's) for Hanes revenue. Got a
+    truthful "$0 in revenue... no non-cancelled sales on record for this brand" --
+    the brand-scoped function simply never sees Hanes rows, so the ACL holds without the
+    user ever being told "access denied" or seeing another brand's numbers. This
+    4-question transcript (the two above, plus a top-3/bottom-3 customers follow-up
+    testing session memory) is now the real, pasted example run in both
+    `docs/architecture.md` §d and the README.
+  - *Injected SQL error / simulated BigQuery downtime*: rather than trying to provoke
+    these from outside (hard to do reliably against a live model), added two
+    deterministic graph-level tests (`tests/test_graph_resilience.py`) with a scripted
+    fake LLM/BigQuery client -- a gap neither the component-level resilience tests nor
+    the delete-flow graph tests covered: (1) an invalid first SQL attempt correctly loops
+    back through `generate_sql` and succeeds on retry; (2) a BigQuery call that *never*
+    succeeds correctly exhausts the self-correction budget and degrades to the graceful
+    fallback message, never a crash.
+  - *Off-topic/malicious prompts, destructive-op zero-match, destructive-op cancel*:
+    already verified live on Day 5; not re-run here.
+- **Full self-review against the original brief**, line by line against the actual brief
+  text (not PLANNING's paraphrase of it), using §10's traceability matrix as the
+  checklist. Found and fixed three real staleness bugs in `docs/architecture.md` --
+  exactly the kind of drift Day 5/6's own audits kept finding elsewhere in this repo:
+  - The empty-candidate-set row in §c's error-handling table, and a near-identical line
+    in §5, still described the original Day 2 plan ("the confirmation step still fires,
+    showing '0 reports match'") -- the actual Day 5 build deliberately skips
+    `interrupt()` entirely when there's nothing to confirm (already correctly described
+    in this doc's own Day 5 results section, just never back-ported into
+    `architecture.md` itself). Fixed both.
+  - A "token/cost budget guard" row described a mechanism that was cut for time back on
+    Day 4 (and reconfirmed cut on Day 6) and never actually existed in code. Fixed to
+    point at the bounded self-correction attempt count, which is the real cost bound.
+  - Sections a-e (the brief's deliverable 2's own lettered sub-items) were missing a real
+    example run (§d) and an explicit per-requirement walkthrough (§e, which didn't exist
+    as its own section at all) -- both added now.
+- **Fresh-machine verification, done for real:** cloned the repo into a throwaway
+  directory, created a brand-new venv, and followed the README's own setup block
+  verbatim (`pip install -r requirements-dev.txt`, `pip install -e . --no-deps`,
+  `pre-commit install`, copying real credentials into a fresh `.env` without ever
+  printing them, per AGENTS.md) -- then ran a real multi-turn conversation and the full
+  `pytest -q -m "not integration"` suite (82 passed) against that fresh clone, not the
+  working checkout. Confirms the "Done when" criterion directly rather than assuming the
+  README is accurate because it was written carefully.
+- `ruff check`, `ruff format`, `mypy src` all clean on both the working checkout and the
+  fresh clone; 82 unit/offline tests passing (up from 80 after adding the two resilience
+  tests), plus the existing 7 integration tests (opt-in, real BigQuery/Qdrant access).
+- Not yet done: pushing to a **public** GitHub repo (the brief's literal submission
+  requirement) -- the repo is currently private; flipping visibility is a one-way,
+  externally-visible change this plan leaves for explicit confirmation rather than doing
+  on its own.
