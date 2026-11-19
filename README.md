@@ -99,6 +99,24 @@ pre-commit install
 Copy-Item .env.example .env   # then fill in GOOGLE_CLOUD_PROJECT and GEMINI_API_KEY
 ```
 
+### BigQuery authentication
+
+`.env`'s `GOOGLE_CLOUD_PROJECT` only says which project to bill queries against -- it
+doesn't authenticate anything. `google-cloud-bigquery` (used by
+`src/retail_agent/data/bq_client.py`) picks up Application Default Credentials
+automatically, so authenticate once per machine with either:
+
+```bash
+gcloud auth application-default login
+```
+
+or, for a service account, point `GOOGLE_APPLICATION_CREDENTIALS` at its key file. See
+[BigQuery's client library docs](https://cloud.google.com/bigquery/docs/reference/libraries#client-libraries-install-python)
+for the full options. No setup beyond this is needed to query
+`bigquery-public-data.thelook_ecommerce` — it's a public dataset, readable by any
+authenticated principal; the project in `GOOGLE_CLOUD_PROJECT` only needs BigQuery API
+access enabled to bill the (free-tier) compute against.
+
 Run all checks, or a single one:
 
 ```bash
