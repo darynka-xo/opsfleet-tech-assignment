@@ -11,7 +11,8 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Literal, TypedDict
 
-Intent = Literal["analysis", "off_topic", "delete_not_yet_available"]
+Intent = Literal["analysis", "off_topic", "delete"]
+DeleteFilterKind = Literal["session", "mention"]
 
 
 class Turn(TypedDict):
@@ -26,6 +27,7 @@ class AgentState(TypedDict):
 
     session_id: str
     app_user_id: str
+    turn_id: str
     question: str
     history: Annotated[list[Turn], operator.add]
 
@@ -43,5 +45,12 @@ class AgentState(TypedDict):
 
     query_result: list[dict[str, object]] | None
     query_row_count: int | None
+
+    # Destructive-ops flow (requirement 5): which reports a delete request targets, the
+    # resolved candidate set, and the user's confirm/cancel answer from the interrupt().
+    delete_filter_kind: DeleteFilterKind | None
+    delete_filter_value: str | None
+    delete_candidates: list[dict[str, object]] | None
+    delete_confirmed: bool | None
 
     final_answer: str | None

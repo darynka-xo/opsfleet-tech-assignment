@@ -286,9 +286,15 @@ this is a design decision made explicitly now, not improvised at Day 5's impleme
 
 - **"Delete all reports mentioning Client X"** — a **content-match** delete. The
   Candidate Resolver searches the requesting user's own (non-deleted) `saved_reports` for
-  `client_mentions` containing "Client X" (an entity list extracted at report-creation
-  time, not a fresh full-text re-scan at delete time — cheaper, and avoids re-deriving
-  what counts as a "mention" twice, inconsistently).
+  "Client X". **Implementation note (Day 5):** this design originally called for
+  `client_mentions` to hold an entity list extracted at report-creation time, matched
+  against at delete time. Built simpler instead: `client_mentions` stays in the DDL
+  (unused) and the resolver runs a direct `LIKE` against `title`/`body` at delete time —
+  this dataset has no real "client" entity to extract in the first place (brand name is
+  the closest analog, and the question text itself already names it), so a separate
+  extraction step would add a moving part without a real entity to extract. A genuine
+  client-tagging feature would re-introduce the column and the extraction step this
+  design originally called for.
 - **"Delete all the reports we made in this conversation"** — a **session-scoped**
   delete. The Candidate Resolver filters by `session_id` on the current conversation,
   never by re-matching report content — "this conversation" is a structural fact the

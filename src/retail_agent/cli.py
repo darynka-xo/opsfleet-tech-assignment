@@ -9,13 +9,14 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sqlite3
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 
 from dotenv import load_dotenv
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.types import RunnableConfig
+from langgraph.types import Command, RunnableConfig
 from prompt_toolkit import PromptSession
 from rich.console import Console
 from rich.markdown import Markdown
@@ -28,6 +29,8 @@ from retail_agent.llm.client import GeminiClient
 RETAIL_ANALYTICS_DATASET = "opsfleet-tech-assignment.retail_analytics"
 QDRANT_PATH = Path(__file__).resolve().parent.parent.parent / ".local" / "qdrant"
 CHECKPOINT_PATH = Path(__file__).resolve().parent.parent.parent / ".local" / "checkpoints.sqlite3"
+APP_DB_PATH = Path(__file__).resolve().parent.parent.parent / ".local" / "app_state.sqlite3"
+APP_DB_SCHEMA_PATH = Path(__file__).resolve().parent.parent.parent / "sql" / "app_state.sql"
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -51,6 +54,20 @@ def _build_line_reader(console: Console) -> Callable[[], str]:
     return lambda: session.prompt("> ")
 
 
+def _open_app_db(path: Path, *, schema_path: Path) -> sqlite3.Connection:
+    """Open (creating if needed) the local app-state SQLite database.
+
+    Args:
+        path: Where the database file lives, e.g. `.local/app_state.sqlite3`.
+        schema_path: The DDL script to apply -- every statement is `CREATE ... IF NOT
+            EXISTS`, so running it against an already-initialized database is a no-op.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.executescript(schema_path.read_text(encoding="utf-8"))
+    return conn
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(description="Retail data-analysis chat agent")
@@ -71,12 +88,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     console = Console()
 
+    app_db = _open_app_db(APP_DB_PATH, schema_path=APP_DB_SCHEMA_PATH)
     deps = AgentDependencies(
         llm=GeminiClient(api_key=os.environ["GEMINI_API_KEY"]),
         bq=BigQueryRunner(
             project_id="opsfleet-tech-assignment", dataset_id=RETAIL_ANALYTICS_DATASET
         ),
         golden_bucket=QdrantGoldenBucketStore(QDRANT_PATH),
+        app_db=app_db,
     )
     graph = build_graph(deps)
 
@@ -109,6 +128,7 @@ def main(argv: list[str] | None = None) -> None:
             turn_input = {
                 "session_id": session_id,
                 "app_user_id": args.user,
+                "turn_id": str(uuid.uuid4()),
                 "question": question,
                 "history": [],
                 "intent": None,
@@ -120,15 +140,34 @@ def main(argv: list[str] | None = None) -> None:
                 "needs_more_data_reason": None,
                 "query_result": None,
                 "query_row_count": None,
+                "delete_filter_kind": None,
+                "delete_filter_value": None,
+                "delete_candidates": None,
+                "delete_confirmed": None,
                 "final_answer": None,
             }
-            with console.status("[dim]thinking...[/]"):
-                try:
+            try:
+                with console.status("[dim]thinking...[/]"):
                     result = app.invoke(turn_input, config=config)
-                except Exception:
-                    logger.exception("Unhandled error processing a turn for session %s", session_id)
-                    console.print("[red]Something went wrong on my end -- please try again.[/]\n")
-                    continue
+
+                # A destructive op (delete) pauses here via interrupt() -- resuming
+                # requires a raw, code-checked yes/no from the user, never an LLM's
+                # judgment that the conversation "sounds like" agreement (AGENTS.md
+                # Security: "Confirmation integrity").
+                while "__interrupt__" in result:
+                    payload = result["__interrupt__"][0].value
+                    console.print(f"[yellow]About to delete {payload['count']} report(s):[/]")
+                    for candidate in payload["candidates"]:
+                        console.print(f"  - {candidate['title']}")
+                    console.print(f"Confirm delete of {payload['count']} report(s)? [y/N]")
+                    raw_answer = read_line().strip().lower()
+                    confirmed = raw_answer in {"y", "yes"}
+                    with console.status("[dim]thinking...[/]"):
+                        result = app.invoke(Command(resume=confirmed), config=config)
+            except Exception:
+                logger.exception("Unhandled error processing a turn for session %s", session_id)
+                console.print("[red]Something went wrong on my end -- please try again.[/]\n")
+                continue
 
             console.print(Markdown(result.get("final_answer") or "(no answer produced)"))
             console.print()
